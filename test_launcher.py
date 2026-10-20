@@ -14,7 +14,7 @@ class ManagerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        root = Path(self.temp.name)
+        root = Path(self.temp.name).resolve()
         self.home = root / 'home'
         self.profile = self.home / 'profiles' / 'desktop'
         self.profile.mkdir(parents=True)
@@ -41,6 +41,20 @@ class ManagerTests(unittest.TestCase):
         state = self.manager.state()
         self.assertEqual({p['id'] for p in state['plugins']}, {'plugin-a', '@demo/plugin-b'})
         self.assertEqual(state['enabled'], ['plugin-a'])
+
+    @unittest.skipUnless(__import__('os').name == 'nt', 'Windows short-path alias')
+    def test_windows_short_home_alias_uses_same_profile_and_snapshot_identity(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        kernel.GetShortPathNameW.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        self.assertTrue(kernel.GetShortPathNameW(str(self.home), buffer, len(buffer)))
+        alias = Manager(self.manager.data, home=buffer.value, executable=self.exe)
+        self.assertEqual(alias.home, self.manager.home)
+        self.assertEqual(alias.tracking.root, self.manager.tracking.root)
+        self.assertEqual(alias.manifest()[0], self.raw)
 
     def test_disable_all_preserves_every_other_field_and_can_reenable(self):
         self.manager.apply([], self.manager.state()['revision'])

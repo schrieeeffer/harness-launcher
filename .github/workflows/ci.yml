@@ -6,8 +6,11 @@ jobs:
   tests:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ['3.12', '3.13']
+    env:
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
