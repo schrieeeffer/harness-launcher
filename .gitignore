@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+*.log
+diagnostics/
+dist/
+preview*.png
+.DS_Store
+Thumbs.db
+instance.json
+settings.json
+patches/
+backups/
+.dsh/
