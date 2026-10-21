@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -134,6 +135,63 @@ class CatalogTests(unittest.TestCase):
             self.catalog.fetch('http://127.0.0.1/private')
         self.assertEqual(safe_url('javascript:alert(1)'), '')
         self.assertEqual(safe_url('https://user:secret@example.com'), '')
+
+    def search_pages(self, pages, fail=(), slow=()):
+        """Fake npm search keyed by the `from` offset; offsets in `fail` raise, offsets in `slow` answer last."""
+        def fetch(url):
+            offset = int(parse_qs(urlparse(url).query)['from'][0])
+            if offset in slow:
+                time.sleep(0.2)
+            if offset in fail:
+                raise CatalogError('offline')
+            objects = [{'package': {'name': name, 'version': '1.0', 'date': '2026-10-01T08:00:00.000Z'},
+                        'downloads': {'weekly': weekly, 'monthly': monthly}} for name, weekly, monthly in pages.get(offset, [])]
+            return {'objects': objects, 'total': 8246}
+        return patch.object(self.catalog, 'fetch', side_effect=fetch)
+
+    def test_leaderboard_ranks_by_weekly_downloads_across_fixed_npm_pages(self):
+        pages = {0: [('dsh-steady', 900, 4000), ('dsh-spiked', 64, 41764), ('../bad', 9999, 9999)],
+                 250: [('dsh-steady', 1, 1), ('@demo/dsh-big', 5000, 20000)],
+                 500: [('dsh-no-downloads', True, 3)], 750: []}
+        # Page 0 answers last, so merging in completion order would keep the later page's duplicate.
+        with self.search_pages(pages, slow={0}) as fetch:
+            result = self.catalog.leaderboard('downloads')
+        urls = [urlparse(call.args[0]) for call in fetch.call_args_list]
+        self.assertEqual({u.hostname for u in urls}, {'registry.npmjs.org'})
+        self.assertEqual(sorted(int(parse_qs(u.query)['from'][0]) for u in urls), [0, 250, 500, 750])
+        self.assertEqual({parse_qs(u.query)['text'][0] for u in urls}, {'keywords:dsh-plugin,deepseek-harness'})
+        self.assertEqual([(x['rank'], x['name'], x['weekly']) for x in result['items']],
+                         [(1, '@demo/dsh-big', 5000), (2, 'dsh-steady', 900), (3, 'dsh-spiked', 64)])
+        self.assertEqual(result['items'][0]['published'], '2026-10-01')
+        self.assertEqual((result['scanned'], result['total'], result['warning']), (3, 8246, ''))
+
+    def test_rising_board_keeps_plugins_downloaded_mostly_this_week(self):
+        pages = {0: [('dsh-new', 3000, 3000), ('dsh-surging', 1000, 1900), ('dsh-steady', 5000, 21000),
+                     ('dsh-tiny-new', 150, 150)]}
+        with self.search_pages(pages) as fetch:
+            rising = self.catalog.leaderboard('rising')
+            downloads = self.catalog.leaderboard('downloads')
+        self.assertEqual([x['name'] for x in rising['items']], ['dsh-new', 'dsh-surging'])
+        self.assertEqual(downloads['items'][0]['name'], 'dsh-steady')
+        self.assertEqual(fetch.call_count, 4, 'both boards should share one cached scan')
+        self.assertTrue(downloads['cached'])
+
+    def test_leaderboard_reports_partial_failure_and_complete_outage(self):
+        with self.search_pages({0: [('dsh-example', 10, 40)]}, fail={250}):
+            partial = self.catalog.leaderboard()
+        self.assertEqual(len(partial['items']), 1)
+        self.assertIn('1 页', partial['warning'])
+        self.catalog.cache.clear()
+        with self.search_pages({}, fail={0, 250, 500, 750}):
+            with self.assertRaises(CatalogError) as caught:
+                self.catalog.leaderboard()
+        self.assertIn('registry.npmjs.org', str(caught.exception))
+
+    def test_unknown_leaderboard_is_rejected_before_network(self):
+        with patch.object(self.catalog, 'fetch') as fetch:
+            with self.assertRaises(CatalogError):
+                self.catalog.leaderboard('stars')
+        fetch.assert_not_called()
 
 
 if __name__ == '__main__':

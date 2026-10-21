@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -7,7 +8,8 @@ from unittest.mock import patch
 import urllib.error
 import urllib.request
 
-from launcher import Manager, MenuError, OFFICIAL, Server, Handler, atomic_write
+from launcher import (Manager, MenuError, OFFICIAL, Server, Handler, UNINSTALL_KEYS, atomic_write,
+                      default_executable, registry_executable)
 
 
 class ManagerTests(unittest.TestCase):
@@ -118,6 +120,19 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(kwargs['env']['DSH_HOME'], str(self.home))
             self.assertNotIn('shell', kwargs)
 
+    def test_missing_executable_blocks_switching_and_offers_detected_install(self):
+        self.manager.settings['executable'] = str(self.exe.parent / 'moved' / 'DeepSeek Harness.exe')
+        with patch('launcher.detect_executable', return_value=self.exe):
+            state = self.manager.state()
+        self.assertFalse(state['executableExists'])
+        self.assertEqual(state['detectedExecutable'], str(self.exe))
+        with self.assertRaises(MenuError):
+            self.manager.apply([], state['revision'])
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        with self.assertRaises(MenuError):
+            self.manager.tracking.begin('plugin-new')
+        self.assertIsNone(self.manager.tracking.summary()['session'])
+
     def test_scheme_persistence_does_not_change_harness(self):
         self.manager.scheme('开发', ['@demo/plugin-b'])
         reread = Manager(self.manager.data)
@@ -180,6 +195,12 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             read('catalog/search', False)
         self.assertEqual(caught.exception.code, 403)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            read('catalog/leaderboard', False)
+        self.assertEqual(caught.exception.code, 403)
+        with patch.object(server.catalog, 'leaderboard', return_value={'items': []}) as board:
+            read('catalog/leaderboard?board=rising')
+        board.assert_called_once_with('rising')
         self.path.unlink()
         self.assertEqual(read('settings')['home'], str(self.home))
         result = read('catalog/search?source=official')
@@ -189,6 +210,62 @@ class ManagerTests(unittest.TestCase):
                 read('catalog/detail?name=dsh-test')
             self.assertEqual(caught.exception.code, 400)
             self.assertEqual(json.load(caught.exception)['error'], 'network unavailable')
+
+
+class FakeRegistry:
+    """Minimal winreg stand-in: one HKCU uninstall key holding the given entries."""
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE = 'HKCU', 'HKLM'
+
+    class Key(dict):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def __init__(self, entries):
+        self.entries = entries
+
+    def OpenKey(self, parent, name):
+        if parent == 'HKCU' and name == UNINSTALL_KEYS[0]:
+            return self.Key(self.entries)
+        if isinstance(parent, dict) and name in parent:
+            return self.Key(parent[name])
+        raise OSError(name)
+
+    def EnumKey(self, key, index):
+        try:
+            return list(key)[index]
+        except IndexError:
+            raise OSError(index) from None
+
+    def QueryValueEx(self, key, name):
+        if name not in key:
+            raise OSError(name)
+        return key[name], 1
+
+
+class ExecutableDetectionTests(unittest.TestCase):
+    def test_uninstall_entry_finds_custom_install_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            exe = Path(folder) / 'DeepSeek Harness.exe'
+            exe.write_bytes(b'fixture')
+            entries = {'other': {'DisplayName': 'Something Else', 'DisplayIcon': str(exe)},
+                       'harness': {'DisplayName': 'DeepSeek Harness 0.2.0-rc.2', 'DisplayIcon': f'{exe},0'}}
+            self.assertEqual(registry_executable(FakeRegistry(entries)), exe)
+            uninstaller = Path(folder) / 'Uninstall DeepSeek Harness.exe'
+            entries['harness'] = {'DisplayName': 'DeepSeek Harness 0.2.0', 'UninstallString': f'"{uninstaller}" /currentuser'}
+            self.assertEqual(registry_executable(FakeRegistry(entries)), exe)
+            entries['harness'] = {'DisplayName': 'DeepSeek Harness', 'DisplayIcon': str(Path(folder) / 'gone' / 'DeepSeek Harness.exe')}
+            self.assertIsNone(registry_executable(FakeRegistry(entries)))
+
+    def test_default_executable_prefers_registered_install(self):
+        registered = Path('X:/custom/DeepSeek Harness.exe')
+        with patch.dict(os.environ), patch('launcher.registry_executable', return_value=registered):
+            os.environ.pop('DSH_EXECUTABLE', None)
+            self.assertEqual(default_executable(), str(registered))
+            os.environ['DSH_EXECUTABLE'] = 'Y:/explicit/DeepSeek Harness.exe'
+            self.assertEqual(default_executable(), str(Path('Y:/explicit/DeepSeek Harness.exe')))
 
 
 if __name__ == '__main__':

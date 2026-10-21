@@ -16,6 +16,11 @@ PACKAGE = re.compile(r'^(?:@[a-z0-9_.-]+/)?[a-z0-9_][a-z0-9_.-]*$')
 REPOSITORY = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.{1,2}$)[A-Za-z0-9_.-]+$')
 VERSION = re.compile(r'^[0-9][0-9A-Za-z.+-]{0,100}$')
 REGISTRIES = {'npm': 'https://registry.npmjs.org', 'mirror': 'https://registry.npmmirror.com'}
+ECOSYSTEM_KEYWORDS = 'keywords:dsh-plugin,deepseek-harness'
+# npm search cannot sort by downloads, so rank within the first pages of its relevance order.
+LEADERBOARD_PAGES, LEADERBOARD_PAGE_SIZE, LEADERBOARD_SIZE = 4, 250, 50
+RISING_MIN_WEEKLY = 200
+DATE = re.compile(r'^\d{4}-\d{2}-\d{2}')
 OFFICIAL_BUNDLES = {
     '@deepseek-ai/dsh-experimental-agent-team-profile': ('智能体团队', '团队协作、共享任务和团队工具。'),
     '@deepseek-ai/dsh-experimental-auto-review': ('自动授权审查', '为工具调用提供模型授权审查。'),
@@ -75,10 +80,10 @@ class Catalog:
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             raise CatalogError('无法连接数据源，请检查网络或尝试中国大陆镜像。') from exc
 
-    def cached(self, key, task):
+    def cached(self, key, task, ttl=300):
         with self.lock:
             previous = self.cache.get(key)
-            if previous and time.time() - previous[0] < 300:
+            if previous and time.time() - previous[0] < ttl:
                 result = copy.deepcopy(previous[1])
                 result['cached'] = True
                 return result
@@ -152,7 +157,7 @@ class Catalog:
                               'provider': 'github', 'kind': 'community', 'version': '',
                               'url': 'https://github.com/' + name, 'stars': repo.get('stargazers_count', 0)})
             return items, (page + 1) * size < min(value.get('total_count', 0), 378)
-        qualifiers = 'scope:deepseek-ai' if source == 'official' else 'keywords:dsh-plugin,deepseek-harness'
+        qualifiers = 'scope:deepseek-ai' if source == 'official' else ECOSYSTEM_KEYWORDS
         # A bare package query also finds packages missing ecosystem keywords.
         text = query if PACKAGE.fullmatch(query) and ('dsh' in query or 'harness' in query) and source == 'community' else qualifiers + ' ' + query
         if registry == 'mirror':
@@ -173,6 +178,57 @@ class Catalog:
                           'provider': 'npm', 'kind': 'official' if official else 'community',
                           'url': 'https://www.npmjs.com/package/' + quote(name, safe='@/'), 'stars': 0})
         return items, (page + 1) * size < value.get('total', 0)
+
+    def leaderboard(self, board='downloads'):
+        """Rank by npm's own 7-day download counts. The mirror reports its own totals, so it is never used."""
+        if board not in ('downloads', 'rising'):
+            raise CatalogError('排行榜类型无效。')
+        result = self.cached(('leaderboard',), self.scan_downloads, ttl=3600)
+        rows = result.pop('rows')
+        if board == 'rising':
+            # Most of the 30-day total happened this week: newly published or suddenly popular.
+            rows = [r for r in rows if r['weekly'] >= RISING_MIN_WEEKLY and r['weekly'] * 2 >= r['monthly']]
+        rows.sort(key=lambda r: (-r['weekly'], r['name']))
+        return {**result, 'board': board, 'items': [{**r, 'rank': i} for i, r in enumerate(rows[:LEADERBOARD_SIZE], 1)]}
+
+    def scan_downloads(self):
+        def page(index):
+            return self.fetch(REGISTRIES['npm'] + '/-/v1/search?' + urlencode(
+                {'text': ECOSYSTEM_KEYWORDS, 'size': LEADERBOARD_PAGE_SIZE, 'from': index * LEADERBOARD_PAGE_SIZE}))
+        rows, failed, total, seen = {}, 0, 0, 0
+        with ThreadPoolExecutor(max_workers=LEADERBOARD_PAGES) as pool:
+            jobs = [pool.submit(page, index) for index in range(LEADERBOARD_PAGES)]
+            # Fetch in parallel but merge in page order, so a package listed on two shifting pages keeps its earlier entry.
+            for job in jobs:
+                try:
+                    value = job.result()
+                except CatalogError:
+                    failed += 1
+                    continue
+                if isinstance(value.get('total'), int):
+                    total = max(total, value['total'])
+                for row in value.get('objects', []):
+                    seen += 1
+                    package, downloads = row.get('package', {}), row.get('downloads')
+                    name = package.get('name', '')
+                    if not isinstance(name, str) or not PACKAGE.fullmatch(name) or name in rows or not isinstance(downloads, dict):
+                        continue
+                    weekly, monthly = downloads.get('weekly'), downloads.get('monthly')
+                    if not all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in (weekly, monthly)):
+                        continue
+                    published = package.get('date')
+                    rows[name] = {'name': name, 'version': str(package.get('version', ''))[:100],
+                                  'description': str(package.get('description', ''))[:1000],
+                                  'provider': 'npm', 'kind': 'official' if name.startswith('@deepseek-ai/') else 'community',
+                                  'url': 'https://www.npmjs.com/package/' + quote(name, safe='@/'),
+                                  'weekly': weekly, 'monthly': max(monthly, weekly),
+                                  'published': published[:10] if isinstance(published, str) and DATE.match(published) else ''}
+        if not rows:
+            if failed:
+                raise CatalogError('无法从 npm 官方源获取下载统计，请检查网络后重试。排行榜需要访问 registry.npmjs.org，中国大陆镜像不提供同口径的下载量。')
+            raise CatalogError('npm 返回的结果中没有下载量数据，暂时无法生成排行榜。' if seen else 'npm 没有返回插件数据。')
+        return {'rows': list(rows.values()), 'scanned': len(rows), 'total': max(total, len(rows)),
+                'warning': f'有 {failed} 页数据加载失败，排名可能不完整。' if failed else ''}
 
     def detail(self, name, provider='npm', registry='npm'):
         if not isinstance(name, str) or registry not in REGISTRIES:

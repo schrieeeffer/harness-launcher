@@ -27,17 +27,62 @@ from plugin_tracking import PluginTracking
 from catalog import Catalog, CatalogError
 
 ROOT = Path(__file__).resolve().parent
+VERSION = "0.1.0"
 DATA = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HarnessLauncher"
 OFFICIAL = ("@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app")
 NAME = re.compile(r"^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def default_executable():
-    """Use explicit configuration or common install locations, never a developer path."""
-    configured = os.environ.get('DSH_EXECUTABLE')
-    if configured:
-        return str(Path(configured).expanduser())
+UNINSTALL_KEYS = (r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+                  r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")
+
+
+def registry_executable(winreg=None):
+    """Read the installer's uninstall entry, which also covers custom install folders. Read-only."""
+    if winreg is None:
+        try:
+            import winreg
+        except ImportError:
+            return None
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for key in UNINSTALL_KEYS:
+            try:
+                root = winreg.OpenKey(hive, key)
+            except OSError:
+                continue
+            with root:
+                index = 0
+                while True:
+                    try:
+                        name = winreg.EnumKey(root, index)
+                    except OSError:
+                        break
+                    index += 1
+                    values = {}
+                    try:
+                        with winreg.OpenKey(root, name) as entry:
+                            for field in ("DisplayName", "DisplayIcon", "InstallLocation", "UninstallString"):
+                                try:
+                                    values[field] = str(winreg.QueryValueEx(entry, field)[0])
+                                except OSError:
+                                    pass
+                    except OSError:
+                        continue
+                    if not values.get("DisplayName", "").startswith("DeepSeek Harness"):
+                        continue
+                    icon = re.sub(r",\s*-?\d+$", "", values.get("DisplayIcon", "")).strip().strip('"')
+                    uninstaller = re.match(r'\s*"?([^"]+?\.exe)', values.get("UninstallString", ""), re.I)
+                    folders = [values.get("InstallLocation", "").strip().strip('"'),
+                               str(Path(uninstaller[1]).parent) if uninstaller else ""]
+                    candidates = ([Path(icon)] if icon else []) + [Path(f) / "DeepSeek Harness.exe" for f in folders if f]
+                    for candidate in candidates:
+                        if candidate.name.lower() == "deepseek harness.exe" and candidate.is_file():
+                            return candidate
+    return None
+
+
+def install_candidates():
     candidates = []
     for folder in (os.environ.get('LOCALAPPDATA'), os.environ.get('ProgramFiles'), os.environ.get('ProgramFiles(x86)')):
         if folder:
@@ -45,7 +90,23 @@ def default_executable():
             candidates.extend([base / 'Programs' / 'DeepSeek Harness' / 'DeepSeek Harness.exe',
                                base / 'DeepSeek Harness' / 'DeepSeek Harness.exe'])
     candidates.append(ROOT.parent / 'DeepSeek Harness.exe')
-    return str(next((p for p in candidates if p.is_file()), candidates[0] if candidates else Path.home() / 'DeepSeek Harness.exe'))
+    return candidates
+
+
+def detect_executable():
+    """Return an existing DeepSeek Harness.exe: DSH_EXECUTABLE, the installer registry entry, then common folders."""
+    configured = os.environ.get('DSH_EXECUTABLE')
+    if configured and Path(configured).expanduser().is_file():
+        return Path(configured).expanduser()
+    return registry_executable() or next((p for p in install_candidates() if p.is_file()), None)
+
+
+def default_executable():
+    """Use explicit configuration or detected install locations, never a developer path."""
+    configured = os.environ.get('DSH_EXECUTABLE')
+    if configured:
+        return str(Path(configured).expanduser())
+    return str(detect_executable() or install_candidates()[0])
 
 
 class MenuError(Exception):
@@ -247,11 +308,14 @@ class Manager:
             patch_mode['pending'] = patch_mode['pending'] or tracking['pending']
             for plugin in plugins:
                 plugin['tracking'] = ('builtin' if plugin['id'] == 'dsh-purge' else 'auto' if plugin['id'] in tracked else 'untracked')
-            return {"plugins": plugins, "enabled": [x for x in bundles if x not in OFFICIAL],
+            exists = Path(self.settings["executable"]).is_file()
+            detected = None if exists else detect_executable()
+            return {"version": VERSION, "plugins": plugins, "enabled": [x for x in bundles if x not in OFFICIAL],
                     "official": list(OFFICIAL), "revision": digest(raw),
                     "running": bool(running_harness()), "home": str(self.home),
                     "profile": str(self.profile), "executable": self.settings["executable"],
-                    "executableExists": Path(self.settings["executable"]).is_file(),
+                    "executableExists": exists,
+                    "detectedExecutable": str(detected) if detected else None,
                     "schemes": self.settings["schemes"], "lastSelection": self.settings["lastSelection"],
                     "backups": self.backup_list(), "patchApplied": applied and patch_mode['mode'] != 'native',
                     "patchMode": patch_mode,
@@ -280,6 +344,11 @@ class Manager:
     def require_stopped(self):
         if running_harness():
             raise MenuError("Harness 正在运行。请先在托盘中完全退出，再应用或启动；不会强制结束你的会话。")
+
+    def require_executable(self):
+        # Patch switching and recording locate the install folder from this path.
+        if not Path(self.settings["executable"]).is_file():
+            raise MenuError("找不到 Harness 程序。补丁切换和安装记录需要准确的安装目录，请先在设置中修正应用路径。")
 
     def switch_layers(self, selection, plugins, before, after, native):
         tracker = self.tracking
@@ -349,9 +418,8 @@ class Manager:
                 raise MenuError("配置已被 Harness 或其他程序修改，请刷新后重试。")
             plugins = self.discover(obj, bundles)
             self.validate_selection(selection, plugins)
+            self.require_executable()
             exe = Path(self.settings["executable"])
-            if launch and not exe.is_file():
-                raise MenuError("找不到 Harness 程序，请在设置中修正应用路径。")
             # Always keep official components; preserve all other JSON fields.
             chosen = set(selection)
             ordered = [x for x in bundles if x in OFFICIAL or x in chosen]
@@ -415,6 +483,7 @@ class Manager:
                     raise ValueError()
             except (ValueError, KeyError, TypeError):
                 raise MenuError("备份内容无效，未作修改。")
+            self.require_executable()
             self.backup(raw, bundles, "恢复备份前")
             self.require_stopped()
             if digest(self.manifest_path.read_bytes()) != revision:
@@ -558,7 +627,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, self.server.manager.state())
             if path == '/api/settings':
                 manager = self.server.manager
-                return self.reply(200, {'home': str(manager.home), 'executable': manager.settings['executable']})
+                return self.reply(200, {'home': str(manager.home), 'executable': manager.settings['executable'],
+                                        'detected': str(detect_executable() or '')})
             if path == "/api/ping":
                 return self.reply(200, {"running": bool(running_harness())})
             if path == '/api/tracking':
@@ -577,6 +647,9 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query)
                 return self.reply(200, self.server.catalog.detail(query.get('name', [''])[0],
                     query.get('provider', ['npm'])[0], query.get('registry', ['npm'])[0]))
+            if path == '/api/catalog/leaderboard':
+                query = parse_qs(urlparse(self.path).query)
+                return self.reply(200, self.server.catalog.leaderboard(query.get('board', ['downloads'])[0]))
             self.reply(404, {"error": "Not found"})
         except Exception as exc:
             self.error(exc)

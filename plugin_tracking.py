@@ -417,6 +417,7 @@ class PluginTracking:
     def begin(self, name, source=''):
         with self.manager.lock:
             self.manager.require_stopped()
+            self.manager.require_executable()
             self.guard(check_files=True)
             if not isinstance(name, str) or not PLUGIN_NAME.fullmatch(name) or name == 'dsh-purge':
                 raise TrackingError('请输入有效的新插件包名。dsh-purge 使用已有的内置还原机制。')
