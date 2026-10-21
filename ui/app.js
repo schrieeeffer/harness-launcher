@@ -85,6 +85,7 @@ function updateSummary() {
   $('selectedCount').textContent = selected.size;
   const titles = {current: '当前配置', none: '原生模式（全部关闭）', all: '全部可用插件', custom: '自定义组合', scheme: activeScheme};
   $('selectionTitle').textContent = titles[mode] || '自定义组合';
+  $('selectionTitle').title = $('selectionTitle').textContent;
   $('selectionDescription').textContent = selected.size ? '启用插件时自动恢复已校验的补丁快照。' : '应用或启动时还原已适配补丁，保留账号与会话。';
   $('selectionList').replaceChildren(...(selected.size ? selection().map(id => element('li', '', id)) : [element('li', 'none', '仅加载官方基础组件')]));
   const patch = state.patchMode || {};
@@ -96,6 +97,7 @@ function updateSummary() {
   $('exeWarningText').textContent = '当前设置的路径不存在：' + state.executable + (state.detectedExecutable ? '。已在系统中检测到 ' + state.detectedExecutable + '，确认无误后可直接使用。' : '。请在设置中选择 DeepSeek Harness.exe。') + ' 修正前不能启动、切换补丁或开始安装记录。';
   $('draftStatus').className = 'draft-status' + (isChanged() || needsPatchSwitch() ? ' changed' : '');
   $('draftStatus').textContent = busy ? '正在校验与切换补丁…' : missing ? '未找到 Harness 程序 · 请先修正应用路径' : state.running ? '切换前请完全退出 Harness' : isChanged() || needsPatchSwitch() ? '待应用 · 同步插件与补丁' : '与当前配置一致';
+  $('draftStatus').title = $('draftStatus').textContent;
   const recording = Boolean(tracking?.session || tracking?.busy);
   $('launch').disabled = busy || recording || state.running || missing;
   $('launch').title = state.running ? '请先退出 Harness（包括托盘）' : missing ? '请在设置中确认应用路径' : '备份配置并启动 Harness';

@@ -391,6 +391,8 @@ Use **Settings → Schemes and files**. The exported file is UTF-8 JSON that you
 
 Below 1120 px wide, the launch panel collapses into a bottom action bar; below 760 px, the sidebar shows icons only.
 
+The bottom bar places the heading, status and controls on separate rows as needed, with matching space reserved below the page content. In smaller windows, the launch button gets its own row. Long scheme names and status messages are truncated; hover over them to read the full text.
+
 <img src="docs/images/compact-window.png" alt="Narrow window: the launch panel collapses into a bottom action bar" width="720">
 
 ## How it works

@@ -795,7 +795,7 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 
 /* Below this width the launch panel collapses into a bottom action bar. */
 @media (max-width: 1119px) {
-  :root { --sidebar-w: 224px; --bar-h: 72px; }
+  :root { --sidebar-w: 224px; --bar-h: 116px; }
 
   .workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .launch-panel { position: static; }
@@ -806,9 +806,11 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
     bottom: 0;
     left: var(--sidebar-w);
     z-index: 10;
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "head head" "status actions";
     align-items: center;
-    gap: 16px;
+    gap: 8px 16px;
     min-height: var(--bar-h);
     padding: 12px clamp(16px, 3vw, 32px);
     border-width: 1px 0 0;
@@ -817,21 +819,24 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
     box-shadow: 0 -4px 16px rgb(16 24 40 / 6%);
     backdrop-filter: blur(12px);
   }
-  .launch-head { flex: none; align-items: center; justify-content: flex-start; gap: 14px; }
-  .launch-summary h2 { font-size: 15px; white-space: nowrap; }
+  .launch-head { grid-area: head; min-width: 0; align-items: center; gap: 14px; }
+  .launch-summary { flex: 1; }
+  .launch-summary h2 { overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
   .selection-metric { display: flex; align-items: baseline; gap: 4px; padding-left: 14px; border-left: 1px solid var(--border); }
+  .selection-metric span { white-space: nowrap; }
   .selection-metric b { font-size: 20px; }
   .launch-description, .selection-list { display: none; }
-  .draft-status { flex: 1; min-width: 0; background: none; padding: 0; }
+  .draft-status { grid-area: status; display: block; min-width: 0; overflow: hidden; background: none; padding: 0; text-overflow: ellipsis; white-space: nowrap; }
+  .draft-status::before { display: inline-block; margin-right: 8px; vertical-align: middle; }
   .draft-status.changed { background: none; }
-  .launch-actions { display: flex; flex-direction: row-reverse; gap: 8px; }
+  .launch-actions { grid-area: actions; min-width: 0; display: flex; flex-direction: row-reverse; gap: 8px; }
   .action-row { display: flex; }
   .action-row #saveScheme { order: -1; }
   .launch-actions .primary { padding: 7px 16px; font-size: 13px; }
 }
 
 @media (max-width: 759px) {
-  :root { --sidebar-w: 64px; --bar-h: 116px; }
+  :root { --sidebar-w: 64px; --bar-h: 144px; }
 
   .sidebar { padding: 16px 8px; }
   .brand { justify-content: center; padding: 4px 0 8px; }
@@ -851,10 +856,7 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
   .plugin-card { gap: 12px; padding: 14px; }
   .plugin-icon { width: 34px; height: 34px; font-size: 15px; }
 
-  .launch-card { flex-wrap: wrap; gap: 10px; padding: 12px 16px; }
-  .launch-head { flex: 1; }
-  .draft-status { flex: 1 1 100%; order: 3; }
-  .launch-actions { flex: 1 1 100%; order: 4; }
+  .launch-card { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "status" "actions"; padding: 12px 16px; }
   .launch-actions > *, .action-row .button { flex: 1; }
 
   .stepper { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -869,6 +871,13 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
   .board-metric { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; justify-items: start; text-align: left; }
   .board-row .button { justify-self: start; margin-top: 4px; }
   .board-desc { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+}
+
+@media (max-width: 480px) {
+  :root { --bar-h: 188px; }
+  .launch-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .action-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .launch-actions .button { padding-left: 8px; padding-right: 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

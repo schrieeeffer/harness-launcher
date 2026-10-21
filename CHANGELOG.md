@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed the narrow-window launch bar clipping the launch button in native mode or with long scheme names. The bar now separates the heading from the controls, stacks buttons in smaller windows, and reserves matching space below the page content. Truncated headings and status messages expose their full text on hover.
 - Reworked the UI layout: two-column workspace with a sticky launch panel (collapses to a bottom bar on narrow windows), grouped sidebar, consistent SVG icons, readable contrast, and formatted HTML/CSS sources.
 - Split "安装与自动记录" into 「手动添加」 (an install flow with explicit npm / local / Git / self-install sources that always records) and 「补丁记录」 (a ledger of recorded, built-in and unrecorded plugins with upgrade entry points).
 - Fixed launch being unavailable for custom install folders: the executable is now also detected from the installer's uninstall registry entry (read-only). A missing executable is reported on the main screen with a one-click fix, and switching, restoring and recording now refuse to run against a missing install.
