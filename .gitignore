@@ -17,4 +17,6 @@ backups/
 migrations/
 recoveries/
 migration-pending.json
+import-pending.json
+import-source.json
 .dsh/

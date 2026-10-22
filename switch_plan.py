@@ -13,11 +13,12 @@ from patch_modes import PatchError, archive_info, file_hash, put, tree_hash
 
 
 class SwitchPlan:
-    def __init__(self, tracker):
+    def __init__(self, tracker, hashes=None):
         self.tracker = tracker
         self.manager = tracker.manager
         self.core = tracker.core
         self.journal = tracker.root / 'switch.json'
+        self.hashes = hashes
 
     def roots(self):
         roots = list(self.tracker.scopes.values())
@@ -107,7 +108,7 @@ class SwitchPlan:
         self.manager.require_executable()
         old = self.tracker.load()
         previous_core = self.core.load()
-        view = FileView(self.roots())
+        view = FileView(self.roots(), self.hashes)
         with self.tracker.versions.read_view(view):
             return self._prepare(selection, plugins, before, after, native, old, previous_core, view)
 

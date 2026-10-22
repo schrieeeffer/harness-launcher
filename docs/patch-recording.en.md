@@ -142,7 +142,7 @@ This phase retains versions and reliably switches supported combinations of curr
 
 ## Storage
 
-Snapshots and state are kept in `%LOCALAPPDATA%\HarnessLauncher\patches\<id>\`. The `<id>` is derived from both the install folder and the data directory, so different installations or data directories never interfere with each other: Runtime data is separate from source code. Use `--data <directory>` for another location; keep the blobs and stash folders with their index.
+Snapshots and state are kept in `%USERPROFILE%\.harness-launcher\patches\<id>\`. The `<id>` is derived from the Harness install folder and Harness data directory. Runtime data is separate from source code. Use `--data <directory>` for another location; keep the blobs and stash folders with their index. The default avoids Windows Store AppData virtualization. `migrate.py --apply` imports the old AppData store once and retains its source. Interrupted copying can resume; links and conflicting contents stop the import.
 
 | Path | Contents |
 | --- | --- |
@@ -154,6 +154,7 @@ Snapshots and state are kept in `%LOCALAPPDATA%\HarnessLauncher\patches\<id>\`. 
 | `tracking\baselines\`, `tracking\combinations\` | Native bases, pre-install configuration and combination records |
 | `tracking\transactions\`, `tracking\switch.json` | Immutable whole-switch plans and active transaction position |
 | `<launcher data directory>\migrations\`, `migration-pending.json` | Pre-migration metadata archives and active one-time conversion journal |
+| `<launcher data directory>\import-source.json`, `import-pending.json` | Original store location and resumable import state |
 | `tracking\logs\` | Output of the official installer |
 
 Files that are currently inactive are stashed in `resources\.harness-launcher-<id>` in the install folder and `.harness-launcher-<id>` in the data directory; they may hold official archives, plugin folders and presets. **Do not delete these folders by hand.**

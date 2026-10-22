@@ -5,14 +5,17 @@ import argparse
 import base64
 import copy
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import stat
 import sys
 import time
 import uuid
 import zipfile
 
-from launcher import DATA, Manager, MenuError, OFFICIAL
+from launcher import DATA, VERSION, Manager, MenuError, OFFICIAL
 from file_view import FileView
 from patch_modes import PatchError, file_hash, put, tree_hash
 from switch_plan import SwitchPlan
@@ -20,6 +23,95 @@ from switch_plan import SwitchPlan
 
 def encoded(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
+
+
+def import_data(source, destination, progress=None):
+    """Copy a logical old store into one physical root, leaving it intact.
+
+    A packaged Windows caller may see individual source files through MSIX
+    virtualization without any symlink. All destination files must resolve
+    under the selected new root. Content blobs use hardlinks when possible.
+    """
+    source, destination = Path(source).absolute(), Path(destination).absolute()
+    if source == destination or destination.is_relative_to(source) or source.is_relative_to(destination):
+        raise PatchError('请选择独立的新数据目录。')
+    source_manager = Manager(source)
+    source_manager.require_stopped()
+    if (source / 'instance.json').exists():
+        raise PatchError('旧启动器服务仍在运行，请先退出。')
+    def linked(path):
+        return path.is_symlink() or path.is_junction()
+    if linked(source) or linked(destination):
+        raise PatchError('数据目录不能是链接。')
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    marker = destination / 'import-pending.json'
+    if marker.exists():
+        if linked(marker) or json.loads(marker.read_bytes()).get('source') != str(source):
+            raise PatchError('目标有另一项未完成的导入，未覆盖。')
+    elif any(destination.iterdir()):
+        raise PatchError('目标数据目录不为空，请使用新目录或继续原导入。')
+    paths = [source / 'settings.json'] if (source / 'settings.json').exists() else []
+    if not paths:
+        raise PatchError('旧数据目录没有 settings.json，未导入。')
+    for folder in ('patches', 'backups', 'recoveries'):
+        base = source / folder
+        if base.exists():
+            if linked(base):
+                raise PatchError('旧数据包含链接，未导入：' + str(base))
+            for directory, folders, files in os.walk(base, followlinks=False):
+                for name in folders:
+                    path = Path(directory) / name
+                    if linked(path):
+                        raise PatchError('旧数据包含链接，未导入：' + str(path))
+                paths.extend(Path(directory) / name for name in files)
+    # Validate the complete copy list before creating any imported files. MSIX
+    # regular files can legitimately resolve outside the logical source root.
+    for path in paths:
+        if linked(path) or not stat.S_ISREG(path.lstat().st_mode):
+            raise PatchError('旧数据包含链接或特殊文件，未导入：' + str(path))
+    def checked(relative):
+        target = destination / relative
+        for path in (target, *target.parents):
+            if path == destination:
+                break
+            if linked(path):
+                raise PatchError('导入目标包含链接，未覆盖：' + str(path))
+        if not target.resolve().is_relative_to(root):
+            raise PatchError('导入目标超出新数据目录。')
+        return target
+    def copy_file(path, temp):
+        with path.open('rb') as source_stream, temp.open('wb') as stream:
+            shutil.copyfileobj(source_stream, stream, 1024 * 1024)
+            stream.flush()
+            os.fsync(stream.fileno())
+        shutil.copystat(path, temp)
+    put(checked(Path('import-pending.json')), encoded({'source': str(source)}))
+    count = 0
+    for path in paths:
+        target = checked(path.relative_to(source))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if file_hash(path) != file_hash(target):
+                raise PatchError('目标已有不同数据，未覆盖：' + str(target))
+            continue
+        temp = target.with_name(target.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            if path.parent.name == 'blobs' and re.fullmatch('[a-f0-9]{64}', path.name):
+                try:
+                    os.link(path.resolve(), temp)
+                except OSError:
+                    copy_file(path, temp)
+            else:
+                copy_file(path, temp)
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+        count += 1
+    if progress:
+        progress(f'已导入 {count} 个数据文件；原数据目录保留。')
+    put(checked(Path('import-source.json')), encoded({'source': str(source), 'at': time.time()}))
+    marker.unlink()
 
 
 def recover_metadata(data):
@@ -83,7 +175,7 @@ def migrate(manager, apply=False, progress=None):
         tracker.check_versions(plugins, current)
         if state:
             tracker.versions.verify_adapter(state)
-        return {'status': 'already-current', 'version': '0.2.0', 'plugins': {p['id']: p['version'] for p in plugins}}
+        return {'status': 'already-current', 'version': VERSION, 'plugins': {p['id']: p['version'] for p in plugins}}
     references = {}
     def convert(value):
         if isinstance(value, str) and re.fullmatch(r'(?:snapshots|deltas)/[a-f0-9]{32}\.json', value):
@@ -108,6 +200,7 @@ def migrate(manager, apply=False, progress=None):
     if new.get('inventory') and tracker.read_object(new['inventory']) != tracker.metadata():
         raise PatchError('记录范围有未归属改动，不能直接迁移。')
     host = file_hash(Path(manager.settings['executable']))
+    verified_blobs = set()
     for name in new['order']:
         tell('校验原始快照并留存插件版本：' + name)
         record = new['records'][name]
@@ -120,8 +213,9 @@ def migrate(manager, apply=False, progress=None):
         for reference in ('baseline', 'after'):
             if record.get(reference):
                 for entry in tracker.read_object(record[reference]).values():
-                    if entry['type'] == 'file':
+                    if entry['type'] == 'file' and entry['hash'] not in verified_blobs:
                         tracker.blob_bytes(entry['hash'])
+                        verified_blobs.add(entry['hash'])
         record.setdefault('source', 'installed:' + name + '@' + record['version'])
         record.setdefault('after', record['baseline'])
         record.setdefault('manifestBefore', None)
@@ -156,7 +250,9 @@ def migrate(manager, apply=False, progress=None):
         staged_core.pop('revision', None)
         staged_core = tracker.versions.bind_adapter(staged_core)
     manager.settings = copy.deepcopy(settings)
-    planner = SwitchPlan(tracker)
+    # One read-only command may inspect several combinations of the same disk
+    # inputs. Reuse reads there, then independently hash everything before commit.
+    planner = SwitchPlan(tracker, hashes={})
     tell('预检当前组合…')
     plan = planner.prepare(current, plugins, raw, raw, not current)
     if staged_core is None:
@@ -195,7 +291,7 @@ def migrate(manager, apply=False, progress=None):
         target['dsh']['profile']['bundles'] = [*OFFICIAL, *ids]
         planner.prepare(ids, plugins, raw, encoded(target), not ids)
         checked.append(ids)
-    report = {'status': 'prepared', 'version': '0.2.0', 'plugins': {p['id']: p['version'] for p in plugins},
+    report = {'status': 'prepared', 'version': VERSION, 'plugins': {p['id']: p['version'] for p in plugins},
               'enabled': current, 'convertedObjects': len(references), 'backups': len(backups),
               'checkedCombinations': checked, 'needsSwitch': bool(plan['operations']),
               'adapterMode': staged_core['mode'] if staged_core else None}
@@ -242,10 +338,22 @@ def migrate(manager, apply=False, progress=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data', type=Path, default=DATA)
+    parser.add_argument('--source', type=Path, help='old data directory to copy; the source is retained')
     parser.add_argument('--apply', action='store_true', help='commit the prepared metadata migration')
     args = parser.parse_args()
     try:
-        print(json.dumps(migrate(Manager(args.data), apply=args.apply,
+        source = args.source
+        marker = args.data / 'import-pending.json'
+        if source is None and marker.exists():
+            source = Path(json.loads(marker.read_bytes())['source'])
+        old = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'HarnessLauncher'
+        if source is None and not (args.data / 'settings.json').exists() and (old / 'settings.json').exists():
+            source = old
+        tell = lambda message: print(message, file=sys.stderr, flush=True)
+        if source is not None and args.apply:
+            import_data(source, args.data, tell)
+        manager = Manager(source if source is not None and not args.apply else args.data)
+        print(json.dumps(migrate(manager, apply=args.apply,
             progress=lambda message: print(message, file=sys.stderr, flush=True)), ensure_ascii=False, indent=2))
     except (OSError, ValueError, PatchError, MenuError) as exc:
         parser.exit(1, str(exc) + '\n')

@@ -56,6 +56,8 @@ class PluginTracking:
         }
 
     def load(self):
+        if any((self.manager.data / name).exists() for name in ('import-pending.json', 'migration-pending.json')):
+            raise TrackingError('数据迁移尚未结束，请退出启动器后运行 migrate.py --apply。')
         if not self.index.is_file():
             return {'format': 2, 'records': {}, 'order': [], 'session': None}
         try:

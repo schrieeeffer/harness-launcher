@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Moved the 0.2.1 default store to `%USERPROFILE%\.harness-launcher` to avoid per-file Windows Store AppData overlays. The offline migrator copies the old logical store to one physical root, retains its source, resumes interrupted atomic copies and refuses linked or conflicting destinations. Multiple migration preflights share content reads; commit still independently verifies live inputs.
 - Unified the launcher at 0.2.0 with current-only runtime indexes, content-addressed objects, adapter records and transaction journals. Removed old per-layer transaction/recovery, UUID readers, interrupted-session adoption and manual finish/accept/launch endpoints. Added a standalone checkpointed `migrate.py` to convert existing metadata once, pin schemes/backups to installed versions, retain current artifacts and correct adapter status only after verifying disk contents.
 - Versioned the built-in adapter's installed code as well as generic plugins; host-provided peer SDKs are bound to the retained official ASAR. Portable scheme imports now pin local installed versions.
 

@@ -142,7 +142,7 @@ dsh-purge 会修改应用本体，因此使用一个专用适配器，而不是�
 
 ## 存储位置
 
-快照和状态保存在 `%LOCALAPPDATA%\HarnessLauncher\patches\<标识>\` 中，`<标识>` 由安装目录和数据目录共同计算得出，因此不同的安装或数据目录互不干扰。运行数据独立于源码目录；可用 `--data <目录>` 指定其他位置，切勿只移动索引而丢下 blob 和暂存目录：
+快照和状态保存在 `%USERPROFILE%\.harness-launcher\patches\<标识>\` 中，`<标识>` 由 Harness 安装目录和 Harness 数据目录共同计算得出。运行数据独立于源码目录；可用 `--data <目录>` 指定其他位置，切勿只移动索引而丢下 blob 和暂存目录。默认位置避开 Windows 商店应用的 AppData 虚拟化；旧 AppData 数据通过 `migrate.py --apply` 一次性归并，原目录保留。数据复制可中断后继续，遇到链接或不同内容会停止：
 
 | 路径 | 内容 |
 | --- | --- |
@@ -154,6 +154,7 @@ dsh-purge 会修改应用本体，因此使用一个专用适配器，而不是�
 | `tracking\baselines\`、`tracking\combinations\` | 原生基线、安装前配置及组合记录 |
 | `tracking\transactions\`、`tracking\switch.json` | 不可变整套切换计划、进行中的事务位置 |
 | `<启动器数据目录>\migrations\`、`migration-pending.json` | 迁移前元数据存档与进行中的一次性迁移日志 |
+| `<启动器数据目录>\import-source.json`、`import-pending.json` | 旧目录来源与可继续的数据导入进度 |
 | `tracking\logs\` | 官方安装器的输出 |
 
 当前没有启用的文件会暂存在安装目录的 `resources\.harness-launcher-<标识>` 和数据目录的 `.harness-launcher-<标识>` 中，里面可能保存着官方归档、插件目录和预设。**不要手动删除这些目录。**

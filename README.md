@@ -12,7 +12,7 @@
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.2.0%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.2.1%20preview-orange.svg)
 
 **简体中文** · [English](README.en.md)
 
@@ -77,9 +77,9 @@ Harness Launcher 用一个本机网页界面解决这些问题：启动前按需
 
 ## 快速开始
 
-### 升级到 0.2.0
+### 升级到 0.2.1
 
-0.2.0 统一使用新版记录格式，移除了旧索引、旧切换日志和旧手动确认接口的运行分支。使用过旧版时，先在旧版完成未结束的安装 / 恢复，然后完全退出 Harness 和启动器后台服务，在项目目录运行：
+0.2.1 统一使用新版记录格式，移除了旧索引、旧切换日志和旧手动确认接口的运行分支。使用过旧版时，先在旧版完成未结束的安装 / 恢复，然后完全退出 Harness 和启动器后台服务，在项目目录运行：
 
 ```powershell
 python migrate.py
@@ -87,6 +87,8 @@ python migrate.py --apply
 ```
 
 第一条准备并校验迁移，第二条替换元数据。工具保留插件实际版本、启用选择和应用文件，把原始索引、设置与配置备份打包保存在启动器数据目录的 `migrations/` 中；缺失的历史安装包不会补造。旧配置备份会绑定迁移时的已安装版本，不能把它当作过去版本的一键降级。工具发现未完成记录、未知文件改动或缺少原始快照时会停止。
+
+新版默认使用 `%USERPROFILE%\.harness-launcher`，避免 Windows 商店应用的 AppData 虚拟化造成同一路径读到不同记录。首次迁移会自动从旧的 `%LOCALAPPDATA%\HarnessLauncher` 归并数据，原目录保留；若导入中断，重新运行 `python migrate.py --apply` 即可继续。自定义旧目录可用 `python migrate.py --source <旧目录> --data <新的空目录> --apply`。只保留新版运行逻辑，旧目录用于存档。
 
 新安装启动器且没有旧数据时无需迁移。日常升级不会自动更新插件包，也不需要维护两套启动器。
 
@@ -138,7 +140,7 @@ python migrate.py --apply
 
 | 参数 / 变量 | 作用 |
 | --- | --- |
-| `--data <目录>` | 使用指定目录保存启动器的设置、备份和快照（默认 `%LOCALAPPDATA%\HarnessLauncher`），适合隔离测试。 |
+| `--data <目录>` | 使用指定目录保存启动器的设置、备份和快照（默认 `%USERPROFILE%\.harness-launcher`），适合隔离测试。 |
 | `--no-open` | 只启动本机服务，不自动打开窗口。 |
 | `DSH_EXECUTABLE` | `DeepSeek Harness.exe` 的完整路径。 |
 | `DSH_HOME` | Harness 数据目录。启动 Harness 时也会把它传给 Harness。 |
@@ -403,7 +405,7 @@ npm 详情会锁定查询到的版本（例如 `@demo/dsh-desk-pet@0.3.7`）。G
 - 文件不超过 64 KB，单个文件最多 100 个方案，导入后总数也不能超过 100 个。
 - 导入前会逐项预览：**新增**、**覆盖**（与现有方案同名）或**跳过**。含本机未安装或文件缺失插件的方案会被跳过，并列出缺少的插件；装好这些插件后，再导入一次同一个文件即可。
 - 导入只更新启动器的方案列表，不修改 Harness 配置，也不会安装插件。导出文件仅含包名，不包含本机版本约束或恢复文件；导入时会重新绑定本机当前版本。
-- 方案保存在启动器设置中（默认 `%LOCALAPPDATA%\HarnessLauncher\settings.json`）。
+- 方案保存在启动器设置中（默认 `%USERPROFILE%\.harness-launcher\settings.json`）。
 
 <img src="docs/images/import-preview.png" alt="导入预览：覆盖 1 个、新增 2 个、跳过 1 个缺少插件的方案" width="640">
 
@@ -469,11 +471,11 @@ flowchart TD
 
 | 位置 | 内容 |
 | --- | --- |
-| `%LOCALAPPDATA%\HarnessLauncher\settings.json` | 应用路径、数据目录、启动方案和插件顺序。 |
-| `%LOCALAPPDATA%\HarnessLauncher\backups\` | `package.json` 的历史备份。 |
-| `%LOCALAPPDATA%\HarnessLauncher\patches\` | 补丁快照、安装记录、安装器日志和差异清单。 |
-| `%LOCALAPPDATA%\HarnessLauncher\launcher.log` | 警告与错误日志，不包含访问令牌。 |
-| `%LOCALAPPDATA%\HarnessLauncher\instance.json` | 当前服务的本机地址（含访问令牌），用于重复启动时复用服务。 |
+| `%USERPROFILE%\.harness-launcher\settings.json` | 应用路径、数据目录、启动方案和插件顺序。 |
+| `%USERPROFILE%\.harness-launcher\backups\` | `package.json` 的历史备份。 |
+| `%USERPROFILE%\.harness-launcher\patches\` | 补丁快照、安装记录、安装器日志和差异清单。 |
+| `%USERPROFILE%\.harness-launcher\launcher.log` | 警告与错误日志，不包含访问令牌。 |
+| `%USERPROFILE%\.harness-launcher\instance.json` | 当前服务的本机地址（含访问令牌），用于重复启动时复用服务。 |
 | `<安装目录>\resources\.harness-launcher-*`<br>`<数据目录>\.harness-launcher-*` | 当前没有启用的官方文件或插件文件的暂存目录。 |
 
 使用 `--data <目录>` 时，前五项会改存到指定目录。快照可能包含你放在规则、技能或配置文件中的私人内容，请妥善保管这些目录。
@@ -578,7 +580,7 @@ Harness 升级会替换官方文件。启动器检测到版本或文件变化后
 
 1. 打开启动器，选择你希望最终保留的状态（例如原生模式，或常用的插件组合），然后点击「应用选择」。
 2. 删除启动器所在的文件夹和桌面快捷方式。**删除启动器本身不会回滚任何 Harness 文件。**
-3. `%LOCALAPPDATA%\HarnessLauncher` 中保存着设置、备份和补丁快照；`resources\.harness-launcher-*` 和数据目录中的 `.harness-launcher-*` 保存着当前没有启用的版本。删除这些目录后，就再也不能切换回那些版本了，请确认不再需要后再删除。
+3. `%USERPROFILE%\.harness-launcher` 中保存着设置、备份和补丁快照；`resources\.harness-launcher-*` 和数据目录中的 `.harness-launcher-*` 保存着当前没有启用的版本。删除这些目录后，就再也不能切换回那些版本了，请确认不再需要后再删除。
 
 ## 开发与贡献
 

@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 from file_view import FileView
 from launcher import Manager
-from migrate import migrate, recover_metadata
+from migrate import import_data, migrate, recover_metadata
 from patch_modes import PatchError, sha
 import test_plugin_tracking as helpers
 import test_version_plan as version_helpers
@@ -100,6 +101,83 @@ class MigrationTests(unittest.TestCase):
         report = migrate(fresh)
         self.assertEqual(report['status'], 'prepared')
         self.assertEqual(fresh.tracking.index.read_bytes(), raw)
+
+    def test_import_keeps_source_and_converts_only_the_new_root(self):
+        raw = self.old_data(native=True)
+        source = self.manager.data
+        settings = (source / 'settings.json').read_bytes()
+        manifest = self.manifest.read_bytes()
+        destination = self.root / 'unified-data'
+        import_data(source, destination)
+        report = migrate(Manager(destination), apply=True)
+        self.assertEqual(report['status'], 'migrated')
+        self.assertEqual(self.manifest.read_bytes(), manifest)
+        self.assertEqual((source / 'settings.json').read_bytes(), settings)
+        self.assertEqual(self.manager.tracking.index.read_bytes(), raw)
+        self.assertEqual(migrate(Manager(destination))['status'], 'already-current')
+        self.assertFalse((destination / 'import-pending.json').exists())
+        self.assertEqual(json.loads((destination / 'import-source.json').read_bytes())['source'], str(source))
+
+    def test_interrupted_import_resumes_without_partial_file_replacements(self):
+        self.old_data()
+        source, destination = self.manager.data, self.root / 'unified-data'
+        import shutil
+        real_copy = shutil.copyfileobj
+        calls = 0
+        def interrupt(stream, target, length):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                target.write(b'incomplete copy')
+                raise OSError('synthetic copy interruption')
+            return real_copy(stream, target, length)
+        with patch('migrate.shutil.copyfileobj', side_effect=interrupt):
+            with self.assertRaises(OSError):
+                import_data(source, destination)
+        self.assertTrue((destination / 'import-pending.json').exists())
+        self.assertFalse(list(destination.rglob('*.tmp')))
+        import_data(source, destination)
+        self.assertEqual(migrate(Manager(destination), apply=True)['status'], 'migrated')
+
+    def test_import_refuses_conflicting_destination_and_active_source(self):
+        self.old_data()
+        source, destination = self.manager.data, self.root / 'unified-data'
+        destination.mkdir()
+        settings = destination / 'settings.json'
+        settings.write_bytes(b'keep destination')
+        with self.assertRaisesRegex(PatchError, '不为空'):
+            import_data(source, destination)
+        self.assertEqual(settings.read_bytes(), b'keep destination')
+        (source / 'instance.json').write_bytes(b'{}')
+        with self.assertRaisesRegex(PatchError, '仍在运行'):
+            import_data(source, self.root / 'second-data')
+        self.assertFalse((self.root / 'second-data').exists())
+
+    def test_import_refuses_directory_links_before_copying(self):
+        self.old_data()
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'private.txt').write_bytes(b'keep outside')
+        link = self.manager.data / 'patches' / 'link'
+        if os.name == 'nt':
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(link))
+        else:
+            os.symlink(outside, link, target_is_directory=True)
+        destination = self.root / 'unified-data'
+        with self.assertRaisesRegex(PatchError, '包含链接'):
+            import_data(self.manager.data, destination)
+        self.assertFalse((destination / 'settings.json').exists())
+        self.assertEqual((outside / 'private.txt').read_bytes(), b'keep outside')
+
+    def test_runtime_blocks_incomplete_import_and_metadata_migration(self):
+        self.record()
+        for name in ('import-pending.json', 'migration-pending.json'):
+            marker = self.manager.data / name
+            marker.write_bytes(b'{}')
+            with self.assertRaisesRegex(PatchError, 'migrate.py'):
+                self.manager.tracking.load()
+            marker.unlink()
 
     def test_migration_write_failure_rolls_back_only_known_metadata(self):
         raw = self.old_data()

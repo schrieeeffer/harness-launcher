@@ -11,10 +11,10 @@ from patch_modes import PatchError, file_hash
 
 
 class FileView:
-    def __init__(self, roots):
+    def __init__(self, roots, hashes=None):
         self.roots = [Path(root) for root in roots]
         self.entries = {}
-        self.hashes = {}
+        self.hashes = {} if hashes is None else hashes
         for root in self.roots:
             self._capture(Path(root))
         self._index_children()

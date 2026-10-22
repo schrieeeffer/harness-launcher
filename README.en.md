@@ -12,7 +12,7 @@ Choose which plugins to load on each launch, discover official and community plu
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.2.0%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.2.1%20preview-orange.svg)
 
 [简体中文](README.md) · **English**
 
@@ -77,9 +77,9 @@ Harness Launcher addresses this with a local web interface. You pick plugins bef
 
 ## Getting started
 
-### Upgrading to 0.2.0
+### Upgrading to 0.2.1
 
-0.2.0 uses one current record format and removes old index, switch-journal and manual-confirmation runtime branches. Finish incomplete recordings/recoveries in the previous version, fully quit Harness and the launcher service, then run in the project folder:
+0.2.1 uses one current record format and removes old index, switch-journal and manual-confirmation runtime branches. Finish incomplete recordings/recoveries in the previous version, fully quit Harness and the launcher service, then run in the project folder:
 
 ```powershell
 python migrate.py
@@ -87,6 +87,8 @@ python migrate.py --apply
 ```
 
 The first command prepares and validates; the second replaces metadata. The tool preserves installed plugin versions, enabled choices and live application files, and archives original indexes, settings and configuration backups under `migrations/` in the launcher data directory. Missing historical artifacts are never fabricated. Old configuration backups bind the versions installed at migration time; they are not historical-version downgrades. Incomplete work, unknown file changes or missing original snapshots stop conversion.
+
+The new default is `%USERPROFILE%\.harness-launcher`, avoiding Windows Store AppData virtualization that can expose different records at the same logical path. Initial migration automatically imports the old `%LOCALAPPDATA%\HarnessLauncher` store and retains its source. After an interrupted import, rerun `python migrate.py --apply`. For a custom source, use `python migrate.py --source <old folder> --data <new empty folder> --apply`. Only the current format is used at runtime; the old folder is an archive.
 
 Fresh installations without old data need no migration. Updating the launcher does not automatically update plugin packages or require maintaining two launcher versions.
 
@@ -138,7 +140,7 @@ If the executable cannot be found, a red banner ("未找到 Harness 程序") app
 
 | Option / variable | Effect |
 | --- | --- |
-| `--data <folder>` | Store the launcher's settings, backups and snapshots in this folder instead of `%LOCALAPPDATA%\HarnessLauncher`. Useful for isolated testing. |
+| `--data <folder>` | Store the launcher's settings, backups and snapshots in this folder instead of `%USERPROFILE%\.harness-launcher`. Useful for isolated testing. |
 | `--no-open` | Start the local service without opening a window. |
 | `DSH_EXECUTABLE` | Full path of `DeepSeek Harness.exe`. |
 | `DSH_HOME` | Harness data directory. It is also passed to Harness when the launcher starts it. |
@@ -403,7 +405,7 @@ Use **Settings → Schemes and files**. The exported file is UTF-8 JSON that you
 - Files are limited to 64 KB and 100 schemes, and the total after importing cannot exceed 100.
 - Before importing, each scheme is previewed as **new** (新增), **overwrite** (覆盖, same name as an existing scheme) or **skipped** (跳过). Schemes that reference plugins that are not installed, or whose files are missing, are skipped and the missing plugins are listed. Install them and import the same file again.
 - Importing only updates the launcher's scheme list. It does not modify the Harness configuration or install plugins. Exports contain package names only, not local version constraints or recovery artifacts; imports bind the current local versions again.
-- Schemes are stored in the launcher settings (by default `%LOCALAPPDATA%\HarnessLauncher\settings.json`).
+- Schemes are stored in the launcher settings (by default `%USERPROFILE%\.harness-launcher\settings.json`).
 
 <img src="docs/images/import-preview.png" alt="Import preview: one overwrite, two new, and one scheme skipped because of a missing plugin" width="640">
 
@@ -469,11 +471,11 @@ For more detail, see [Patch recording and restoration: technical notes](docs/pat
 
 | Location | Contents |
 | --- | --- |
-| `%LOCALAPPDATA%\HarnessLauncher\settings.json` | Executable path, data directory, schemes and plugin order. |
-| `%LOCALAPPDATA%\HarnessLauncher\backups\` | Backups of `package.json`. |
-| `%LOCALAPPDATA%\HarnessLauncher\patches\` | Patch snapshots, install records, installer logs and change lists. |
-| `%LOCALAPPDATA%\HarnessLauncher\launcher.log` | Warnings and errors; it never contains the access token. |
-| `%LOCALAPPDATA%\HarnessLauncher\instance.json` | The local address of the running service, including its access token, used to reuse the service on repeated starts. |
+| `%USERPROFILE%\.harness-launcher\settings.json` | Executable path, data directory, schemes and plugin order. |
+| `%USERPROFILE%\.harness-launcher\backups\` | Backups of `package.json`. |
+| `%USERPROFILE%\.harness-launcher\patches\` | Patch snapshots, install records, installer logs and change lists. |
+| `%USERPROFILE%\.harness-launcher\launcher.log` | Warnings and errors; it never contains the access token. |
+| `%USERPROFILE%\.harness-launcher\instance.json` | The local address of the running service, including its access token, used to reuse the service on repeated starts. |
 | `<install folder>\resources\.harness-launcher-*`<br>`<data directory>\.harness-launcher-*` | Stashes of official or plugin files that are currently inactive. |
 
 With `--data <folder>`, the first five entries are stored in that folder instead. Snapshots can contain private material you keep in rules, skills or configuration files, so keep these folders private.
@@ -578,7 +580,7 @@ Not yet. Install paths, process detection and patch handling are unfinished on t
 
 1. Open the launcher, choose the state you want to keep (for example native mode, or your usual plugin combination), and click **Apply**.
 2. Delete the launcher folder and any desktop shortcut. **Deleting the launcher does not roll back any Harness files.**
-3. `%LOCALAPPDATA%\HarnessLauncher` holds settings, backups and patch snapshots, and `resources\.harness-launcher-*` plus `.harness-launcher-*` in the data directory hold versions that are currently inactive. Once you delete them you can no longer switch back to those versions, so only remove them when you are sure you no longer need them.
+3. `%USERPROFILE%\.harness-launcher` holds settings, backups and patch snapshots, and `resources\.harness-launcher-*` plus `.harness-launcher-*` in the data directory hold versions that are currently inactive. Once you delete them you can no longer switch back to those versions, so only remove them when you are sure you no longer need them.
 
 ## Development and contributing
 

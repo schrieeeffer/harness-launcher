@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 try {
     $launcherRoot = $PSScriptRoot
-    $settingsPath = Join-Path $env:LOCALAPPDATA 'HarnessLauncher\settings.json'
+    $settingsPath = Join-Path $env:USERPROFILE '.harness-launcher\settings.json'
     $applicationPath = $env:DSH_EXECUTABLE
     if (Test-Path -LiteralPath $settingsPath) {
         $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json

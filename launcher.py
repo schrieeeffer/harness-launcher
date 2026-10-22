@@ -28,8 +28,10 @@ from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.2.0"
-DATA = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HarnessLauncher"
+VERSION = "0.2.1"
+# AppData can present a per-file MSIX overlay to a packaged caller and a
+# different file to Explorer. A home directory has one stable physical root.
+DATA = Path.home() / ".harness-launcher"
 OFFICIAL = ("@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app")
 NAME = re.compile(r"^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -735,6 +737,8 @@ def main():
     args.data.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=args.data / "launcher.log", level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
+    if any((args.data / name).exists() for name in ('import-pending.json', 'migration-pending.json')):
+        raise MenuError('数据迁移尚未结束，请先运行 migrate.py --apply。')
     # Fixed loopback port makes repeated shortcuts reopen the same local menu.
     port = 17643
     instance_path = args.data / "instance.json"
@@ -819,6 +823,6 @@ if __name__ == "__main__":
     except Exception:
         logging.exception("Launcher startup failed")
         if os.name == "nt":
-            ctypes.windll.user32.MessageBoxW(None, "启动菜单未能打开，请检查 HarnessLauncher\\launcher.log。", "Harness 启动菜单", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, "启动菜单未能打开，请检查 " + str(DATA / 'launcher.log'), "Harness 启动菜单", 0x10)
         else:
             raise
