@@ -21,7 +21,8 @@ node --check ui/app.js
 
 - 插件发现的元数据与安装流程保持分离。包名、描述、链接和仓库文件都视为不可信数据，界面中一律用 `textContent` 渲染。
 - 插件目录只能访问固定的公开 registry 和 GitHub 接口，不能请求用户提供的任意地址。
-- 安装前必须由用户明确确认，文件变更必须经过归属复核，不能跳过。
+- 用户明确开始安装后，记录必须始终开启。备份、首次运行监督、文件稳定性和双向恢复数据校验、保存均自动完成；异常才要求处理，不允许丢弃已经发生改动的记录。
+- 文件组合必须先只读预检，再用统一事务执行；运行时只读取新版，旧数据转换集中到独立迁移工具并存档，插件版本、依赖图及组合记录按内容哈希保存，不覆盖历史记录。新增恢复行为应使用隔离夹具验证失败与中断。
 - 界面在严格的内容安全策略下运行：不要使用内联脚本、内联 `style` 属性或外部 CDN 资源。修改 `ui/index.html` 时，保留 `ui/app.js` 使用的元素 id。
 - 改动界面后，请同时检查宽窗口、1120 px 以下和 760 px 以下的布局。
 
@@ -60,7 +61,8 @@ Tests use temporary folders, synthetic data and mocked public APIs. They must **
 
 - Keep discovery metadata separate from installation. Treat package names, descriptions, links and repository files as untrusted data and render them with `textContent`.
 - The catalog may only fetch fixed public registry and GitHub endpoints, never arbitrary user-supplied URLs.
-- Keep the explicit user confirmation before installation and the review of file-change attribution.
+- Keep the explicit user action to start installation. Recording is mandatory: automate backup, first-run supervision, stability and bidirectional recovery-data checks, and saving. Request intervention on exceptions only; do not allow changed installations to discard their records.
+- Preflight file combinations without live mutations before executing one transaction. Keep runtime reads current-only and isolate old-data conversion in the checkpointed migration tool, keep content-addressed revisions/dependency graphs/combinations immutable, and cover recovery changes with isolated failure/interruption fixtures.
 - The UI runs under a strict Content Security Policy: no inline scripts, inline `style` attributes or CDN assets. When editing `ui/index.html`, keep the element ids that `ui/app.js` relies on.
 - After UI changes, check the wide layout as well as the layouts below 1120 px and 760 px.
 

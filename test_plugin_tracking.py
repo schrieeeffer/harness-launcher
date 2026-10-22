@@ -15,15 +15,21 @@ import test_patch_modes as fixtures
 
 
 class GenericTrackingTests(unittest.TestCase):
-    setUp = fixtures.PatchModeTests.setUp
+    def setUp(self):
+        fixtures.PatchModeTests.setUp(self)
+        self.spawn = patch('plugin_tracking.subprocess.Popen')
+        self.popen = self.spawn.start()
+        self.popen.return_value.poll.return_value = None
+        self.popen.return_value.wait.return_value = 0
+        self.addCleanup(self.spawn.stop)
 
-    def wait_job(self):
+    def wait_job(self, allow_error=False):
         limit = time.monotonic() + 20
         while self.manager.tracking.busy and time.monotonic() < limit:
             time.sleep(.01)
         self.assertFalse(self.manager.tracking.busy, 'worker did not finish')
         summary = self.manager.tracking.summary()
-        if summary['session']:
+        if summary['session'] and not allow_error:
             self.assertFalse(summary['session'].get('error'), summary['session'].get('error'))
         return summary
 
@@ -42,10 +48,17 @@ class GenericTrackingTests(unittest.TestCase):
         self.manifest.write_text(json.dumps(obj))
 
     def accept(self):
-        self.manager.tracking.finish()
+        self.close_runtime()
         result = self.wait_job()
-        self.assertEqual(result['session']['phase'], 'review')
-        self.manager.tracking.accept()
+        self.assertIsNone(result['session'])
+
+    def close_runtime(self):
+        tracker = self.manager.tracking
+        started = tracker.load()['session']['launchAt']
+        with patch.object(self.manager, 'is_running', return_value=True):
+            tracker.tick(started + 1)
+        tracker.tick(started + 2)
+        tracker.tick(started + 5)
 
     def apply(self, ids, launch=False):
         return self.manager.apply(ids, self.manager.state()['revision'], launch=launch, native=not ids)
@@ -170,20 +183,27 @@ class GenericTrackingTests(unittest.TestCase):
         self.begin()
         self.install_fixture('plugin-a')
         self.install_fixture('plugin-b')
-        with self.assertRaises(TrackingError):
-            self.manager.tracking.finish()
+        self.close_runtime()
+        session = self.wait_job(allow_error=True)['session']
+        self.assertIn('其他插件', session['error'])
+        self.assertNotIn('plugin-a', self.manager.tracking.load()['records'])
 
-    def test_review_rejects_files_changed_after_scan(self):
+    def test_automatic_save_rejects_files_changed_after_scan(self):
         self.begin()
         self.install_fixture('plugin-a')
         file = self.home / 'rules' / 'new.md'
         file.parent.mkdir()
         file.write_bytes(b'first')
-        self.manager.tracking.finish()
-        self.wait_job()
-        file.write_bytes(b'user changed during review')
-        with self.assertRaises(TrackingError):
-            self.manager.tracking.accept()
+        tracker = self.manager.tracking
+        save = tracker._save_record
+        def race():
+            file.write_bytes(b'user changed during verification')
+            return save()
+        with patch.object(tracker, '_save_record', side_effect=race):
+            self.close_runtime()
+            session = self.wait_job(allow_error=True)['session']
+        self.assertIn('文件再次改变', session['error'])
+        self.assertNotIn('plugin-a', tracker.load()['records'])
 
     def test_launch_failure_restores_generic_and_builtin_layers(self):
         self.begin()
@@ -250,40 +270,25 @@ class GenericTrackingTests(unittest.TestCase):
         self.assertEqual(record['history'][0]['delta'], old_delta)
         self.assertEqual(self.manager.tracking.summary()['records']['plugin-a']['historyCount'], 1)
 
-    def test_version_changed_during_review_requires_rescan(self):
+    def test_version_changed_during_verification_requires_rescan(self):
         self.begin()
         self.install_fixture('plugin-a')
-        self.manager.tracking.finish()
-        self.wait_job()
         meta = self.profile / 'node_modules' / 'plugin-a' / 'package.json'
         pkg = json.loads(meta.read_bytes())
         pkg['version'] = '2.0'
-        meta.write_text(json.dumps(pkg))
-        with self.assertRaisesRegex(TrackingError, '复核期间插件版本'):
-            self.manager.tracking.accept()
-        self.assertNotIn('plugin-a', self.manager.tracking.load()['records'])
-        self.accept()
-        self.assertEqual(self.manager.tracking.load()['records']['plugin-a']['version'], '2.0')
-
-    def test_recovery_handles_crash_between_file_write_and_cursor_update(self):
-        self.begin()
-        self.install_fixture('plugin-a')
-        file = self.home / 'rules' / 'new.md'
-        file.parent.mkdir()
-        file.write_bytes(b'A')
-        self.accept()
         tracker = self.manager.tracking
-        state = tracker.load()
-        operations = tracker.operations(tracker.read_object(state['records']['plugin-a']['delta'])['changes'], enable=False)
-        journal = json.loads(json.dumps(state))
-        journal['pending'] = {'id': 'test', 'operations': operations, 'previous': state}
-        tracker.save(journal)
-        (tracker.root / 'replay-position.json').write_text(json.dumps({'id': 'test', 'cursor': 0}))
-        tracker.replay([operations[0]])
-        with self.assertRaises(TrackingError):
-            tracker.guard()
-        self.assertEqual(file.read_bytes(), b'A')
-        self.assertIsNone(tracker.load()['pending'])
+        save = tracker._save_record
+        def race():
+            meta.write_text(json.dumps(pkg))
+            return save()
+        with patch.object(tracker, '_save_record', side_effect=race):
+            self.close_runtime()
+            session = self.wait_job(allow_error=True)['session']
+        self.assertIn('版本或安装列表再次改变', session['error'])
+        self.assertNotIn('plugin-a', self.manager.tracking.load()['records'])
+        tracker.retry()
+        self.wait_job()
+        self.assertEqual(self.manager.tracking.load()['records']['plugin-a']['version'], '2.0')
 
     def test_new_links_are_not_silently_registered(self):
         tracker = self.manager.tracking
@@ -291,6 +296,204 @@ class GenericTrackingTests(unittest.TestCase):
                     'after': {'type': 'link', 'target': 'C:/outside'}}]
         with self.assertRaises(TrackingError):
             tracker.operations(changes)
+
+    def test_install_and_first_run_save_without_manual_scan_or_accept(self):
+        tracker = self.manager.tracking
+        def install(name, source, session_id):
+            self.install_fixture(name)
+            (self.app / 'main.js').write_bytes(b'installer patch')
+        with patch.object(tracker, 'install', side_effect=install):
+            tracker.begin('plugin-a', 'plugin-a@1.0')
+            self.wait_job()
+        self.assertEqual(self.popen.call_args.args[0], [str(self.exe)])
+        self.assertNotIn('plugin-a', tracker.load()['records'])
+        (self.app / 'first-run.txt').write_bytes(b'created on first run')
+        self.accept()
+        record = tracker.load()['records']['plugin-a']
+        self.assertEqual(record['count'], 2)
+        self.apply([])
+        self.apply(['dsh-purge', 'plugin-a'])
+        self.assertEqual((self.app / 'first-run.txt').read_bytes(), b'created on first run')
+
+    def test_process_must_be_observed_before_record_can_finish(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        with self.assertRaisesRegex(TrackingError, '首次运行尚未完成'):
+            tracker.finish()
+        tracker.tick(tracker.load()['session']['launchAt'] + 31)
+        self.assertIn('未检测到', tracker.load()['session']['error'])
+        self.assertNotIn('plugin-a', tracker.load()['records'])
+
+    def test_another_runtime_cannot_substitute_for_a_failed_first_launch(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        self.popen.return_value.poll.return_value = 1
+        with patch.object(self.manager, 'is_running', return_value=True):
+            tracker.tick()
+        self.assertIn('无法确认本次启动', tracker.load()['session']['error'])
+        self.assertFalse(tracker.load()['session']['observedRunning'])
+        self.assertFalse(tracker.load()['records'])
+
+    def test_tray_process_and_unsettled_files_delay_automatic_save(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        started = tracker.load()['session']['launchAt']
+        with patch.object(self.manager, 'is_running', return_value=True):
+            tracker.tick(started + 1)
+            tracker.tick(started + 100)
+        self.assertFalse(tracker.load()['session']['runClosed'])
+        tracker.tick(started + 101)
+        changing = self.app / 'late.txt'
+        changing.write_bytes(b'late shutdown write')
+        tracker.tick(started + 104)
+        self.assertIsNotNone(tracker.load()['session'])
+        tracker.tick(started + 107)
+        self.wait_job()
+        self.assertIsNone(tracker.load()['session'])
+        self.assertEqual(tracker.load()['records']['plugin-a']['count'], 1)
+
+    def test_install_failure_keeps_baseline_and_retry_reuses_it(self):
+        tracker = self.manager.tracking
+        original = (self.app / 'main.js').read_bytes()
+        def failed_install(name, source, session_id):
+            self.install_fixture(name)
+            (self.app / 'main.js').write_bytes(b'partial install')
+            raise OSError('synthetic installer failure')
+        with patch.object(tracker, 'install', side_effect=failed_install):
+            tracker.begin('plugin-a', 'plugin-a@1.0')
+            session = self.wait_job(allow_error=True)['session']
+        baseline = session['baseline']
+        self.assertTrue(baseline)
+        with self.assertRaises(TrackingError):
+            tracker.abandon()
+        def fixed_install(name, source, session_id):
+            (self.app / 'main.js').write_bytes(b'complete install')
+        with patch.object(tracker, 'install', side_effect=fixed_install):
+            tracker.retry()
+            self.wait_job()
+        self.assertEqual(tracker.load()['session']['baseline'], baseline)
+        self.accept()
+        self.apply(['dsh-purge'])
+        self.assertEqual((self.app / 'main.js').read_bytes(), original)
+
+    def test_restart_interrupts_instead_of_silently_adopting_downtime_changes(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        baseline = self.manager.tracking.load()['session']['baseline']
+        fresh = Manager(self.manager.data)
+        fresh.tracking.tick()
+        session = fresh.tracking.load()['session']
+        self.assertIn('意外中断', session['error'])
+        self.assertEqual(session['baseline'], baseline)
+        self.assertFalse(fresh.tracking.active())
+        fresh.tracking.retry()
+        self.manager = fresh
+        self.wait_job()
+        self.assertEqual(fresh.tracking.load()['session']['baseline'], baseline)
+        self.accept()
+
+    def test_no_abandon_after_install_or_managed_file_changes(self):
+        self.begin()
+        tracker = self.manager.tracking
+        (self.app / 'manual-edit.txt').write_bytes(b'keep original baseline')
+        with self.assertRaisesRegex(TrackingError, '文件已经改动'):
+            tracker.abandon()
+        self.assertIsNotNone(tracker.load()['session'])
+        self.install_fixture('plugin-a')
+        with self.assertRaisesRegex(TrackingError, '插件安装已经发生'):
+            tracker.abandon()
+
+    def test_new_file_during_verification_is_not_silently_sealed(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        save = tracker._save_record
+        def race():
+            (self.app / 'unexpected.txt').write_bytes(b'external write')
+            return save()
+        with patch.object(tracker, '_save_record', side_effect=race):
+            self.close_runtime()
+            session = self.wait_job(allow_error=True)['session']
+        self.assertIn('文件再次改变', session['error'])
+        self.assertFalse(tracker.load()['records'])
+        self.assertIsNone(tracker.load().get('inventory'))
+
+    def test_corrupt_original_blob_blocks_registration(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        baseline = tracker.read_object(tracker.load()['session']['baseline'])
+        original_hash = baseline['app|main.js']['hash']
+        (self.app / 'main.js').write_bytes(b'plugin patch')
+        (tracker.root / 'blobs' / original_hash).write_bytes(b'corrupt original')
+        self.close_runtime()
+        session = self.wait_job(allow_error=True)['session']
+        self.assertIn('快照校验失败', session['error'])
+        self.assertNotIn('plugin-a', tracker.load()['records'])
+        self.assertEqual((self.app / 'main.js').read_bytes(), b'plugin patch')
+
+    def test_host_upgrade_stops_save_and_later_combination_switches(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        raw = self.manifest.read_bytes()
+        self.exe.write_bytes(b'new application version')
+        with self.assertRaisesRegex(MenuError, 'Harness 程序已更新'):
+            self.apply([])
+        self.assertEqual(self.manifest.read_bytes(), raw)
+
+    def test_untracked_plugin_blocks_non_native_combination_too(self):
+        self.install_fixture('plugin-untracked')
+        raw = self.manifest.read_bytes()
+        with self.assertRaisesRegex(MenuError, '缺少安装前记录'):
+            self.apply(['dsh-purge'])
+        self.assertEqual(self.manifest.read_bytes(), raw)
+
+    def test_supervisor_errors_are_visible_and_keep_the_baseline(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        baseline = tracker.load()['session']['baseline']
+        value = tracker.load()
+        value['session']['observedRunning'] = True
+        tracker.save(value)
+        with patch.object(tracker, 'metadata', side_effect=PermissionError('synthetic locked file')):
+            tracker.tick()
+        self.assertIn('locked file', tracker.load()['session']['error'])
+        self.assertEqual(tracker.load()['session']['baseline'], baseline)
+
+    def test_corrupt_replay_copy_fails_before_any_file_is_changed(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        first = self.app / 'first.txt'
+        second = self.app / 'second.txt'
+        first.write_bytes(b'first patch')
+        second.write_bytes(b'second patch')
+        self.accept()
+        tracker = self.manager.tracking
+        changes = tracker.read_object(tracker.load()['records']['plugin-a']['delta'])['changes']
+        second_hash = next(x['after']['hash'] for x in changes if x['key'] == 'app|second.txt')
+        (tracker.root / 'blobs' / second_hash).write_bytes(b'corrupt copy')
+        raw = self.manifest.read_bytes()
+        with self.assertRaisesRegex(MenuError, '快照校验失败'):
+            self.apply([])
+        self.assertEqual(first.read_bytes(), b'first patch')
+        self.assertEqual(second.read_bytes(), b'second patch')
+        self.assertEqual(self.manifest.read_bytes(), raw)
+
+    def test_other_plugin_installed_by_installer_is_blocked_before_launch(self):
+        tracker = self.manager.tracking
+        def install(name, source, session_id):
+            self.install_fixture(name)
+            self.install_fixture('unrelated-plugin')
+        with patch.object(tracker, 'install', side_effect=install):
+            tracker.begin('plugin-a', 'plugin-a@1.0')
+            session = self.wait_job(allow_error=True)['session']
+        self.assertIn('其他插件或加载组合', session['error'])
+        self.popen.assert_not_called()
 
     def test_http_recording_flow_and_native_switch(self):
         server = Server(('127.0.0.1', 0), Handler)
@@ -313,11 +516,11 @@ class GenericTrackingTests(unittest.TestCase):
         self.wait_job()
         self.install_fixture('plugin-a')
         (self.app / 'main.js').write_bytes(b'generic HTTP-recorded patch')
-        api('tracking/finish', {})
+        self.close_runtime()
         self.wait_job()
-        self.assertTrue(api('tracking/diff')['changes'])
-        api('tracking/accept', {})
         state = api('state')
+        self.assertIsNone(state['tracking']['session'])
+        self.assertEqual(state['tracking']['completed']['plugin'], 'plugin-a')
         self.assertIn('plugin-a', state['tracking']['records'])
         api('apply', {'selection': [], 'revision': state['revision'], 'native': True})
         self.assertTrue(api('state')['patchMode']['verifiedNative'])

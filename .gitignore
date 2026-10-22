@@ -14,4 +14,7 @@ instance.json
 settings.json
 patches/
 backups/
+migrations/
+recoveries/
+migration-pending.json
 .dsh/

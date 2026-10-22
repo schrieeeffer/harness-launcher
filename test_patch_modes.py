@@ -91,6 +91,54 @@ class PatchModeTests(unittest.TestCase):
         self.switch([])
         self.assertTrue(self.manager.state()['patchMode']['verifiedNative'])
 
+    def test_missing_record_launch_uses_retained_archive_and_preserves_user_rules(self):
+        self.switch([])
+        self.switch(['dsh-purge'])
+        controller = PatchModes(self.manager)
+        controller.record.unlink()
+        self.assertFalse(self.archive.exists())
+        self.assertTrue(self.manager.state()['patchMode']['archiveAvailable'])
+
+        with patch('launcher.subprocess.Popen') as spawn:
+            self.manager.apply(['dsh-purge'], self.manager.state()['revision'], launch=True)
+        spawn.assert_called_once()
+        self.switch([])
+        self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
+        self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'original user instruction')
+        self.assertTrue(self.manager.state()['patchMode']['verifiedNative'])
+        self.switch(['dsh-purge'])
+        self.assertEqual(tree_hash(self.app), self.initial_tree)
+        self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'Little Code Sauce plugin-owned rule')
+
+    def test_recapture_prefers_retained_official_archive_over_plugin_backup(self):
+        self.switch([])
+        self.switch(['dsh-purge'])
+        controller = PatchModes(self.manager)
+        controller.record.unlink()
+        backup = self.resources / 'app.asar.bak'
+        backup.write_bytes(b'not an official archive')
+
+        self.switch([])
+        self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
+        self.assertEqual(backup.read_bytes(), b'not an official archive')
+
+    def test_recapture_rejects_corrupt_retained_archive_without_changing_app(self):
+        self.switch([])
+        self.switch(['dsh-purge'])
+        controller = PatchModes(self.manager)
+        controller.record.unlink()
+        official = controller.stash / 'official.asar'
+        original = official.read_bytes()
+        official.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        before = self.manifest.read_bytes()
+
+        with self.assertRaisesRegex(MenuError, '完整性校验失败'):
+            self.switch([])
+        self.assertEqual(self.manifest.read_bytes(), before)
+        self.assertEqual(tree_hash(self.app), self.initial_tree)
+        self.assertFalse(controller.record.exists())
+        self.assertFalse(self.archive.exists())
+
     def test_archive_update_does_not_restore_old_patches(self):
         self.switch([])
         self.archive.write_bytes(self.archive_bytes + b'updated')
@@ -141,7 +189,7 @@ class PatchModeTests(unittest.TestCase):
         self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
         self.assertEqual(self.manifest.read_bytes(), self.initial_manifest)
         self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'Little Code Sauce plugin-owned rule')
-        self.assertEqual(PatchModes(self.manager).load()['mode'], 'legacy')
+        self.assertEqual(PatchModes(self.manager).load()['mode'], 'captured')
 
     def test_launch_failure_rolls_back_patch_switch(self):
         with patch('launcher.subprocess.Popen', side_effect=OSError('spawn failed')):
@@ -165,18 +213,6 @@ class PatchModeTests(unittest.TestCase):
             self.switch(['dsh-purge'])
         self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'new native rule written by user')
 
-    def test_incomplete_journal_recovers_on_next_attempt(self):
-        ctl = PatchModes(self.manager)
-        raw, obj, bundles = self.manager.manifest()
-        state = ctl.capture(self.manager.discover(obj, bundles))
-        op = ctl.move_op(ctl.app, ctl.stash / 'app')
-        state['pending'] = {'target': 'native', 'operations': [op]}
-        ctl.save(state)
-        ctl.replay([op])
-        with self.assertRaises(MenuError):
-            self.switch([])
-        self.assertEqual(tree_hash(self.app), self.initial_tree)
-        self.assertIsNone(ctl.load()['pending'])
 
 
 if __name__ == '__main__':

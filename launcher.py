@@ -22,12 +22,13 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-from patch_modes import PatchModes, PatchError
+from patch_modes import PatchModes, PatchError, file_hash
 from plugin_tracking import PluginTracking
+from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DATA = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HarnessLauncher"
 OFFICIAL = ("@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app")
 NAME = re.compile(r"^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
@@ -188,6 +189,7 @@ class Manager:
         self.settings.setdefault("home", str(home or os.environ.get("DSH_HOME") or Path.home() / ".dsh"))
         self.settings.setdefault("executable", str(executable or default_executable()))
         self.settings.setdefault("schemes", {})
+        self.settings.setdefault("schemeLocks", {})
         self.settings.setdefault("order", [])
         self.settings.setdefault("lastSelection", None)
         if home:
@@ -198,10 +200,11 @@ class Manager:
 
     @property
     def tracking(self):
-        identity = (str(self.home), self.settings['executable'])
-        if self._track_cache is None or self._track_cache[0] != identity:
-            self._track_cache = (identity, PluginTracking(self))
-        return self._track_cache[1]
+        with self.lock:
+            identity = (str(self.home), self.settings['executable'])
+            if self._track_cache is None or self._track_cache[0] != identity:
+                self._track_cache = (identity, PluginTracking(self))
+            return self._track_cache[1]
 
     @property
     def home(self):
@@ -286,7 +289,7 @@ class Manager:
         for path in sorted(folder.glob("*.json"), reverse=True)[:100]:
             try:
                 info = read_json(path)
-                if info.get("target") == str(self.manifest_path):
+                if info.get('format') == 2 and info.get("target") == str(self.manifest_path):
                     records.append({"id": path.name, "time": info["time"],
                                     "reason": info["reason"], "plugins": info["plugins"]})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -304,7 +307,8 @@ class Manager:
             patch_mode = PatchModes(self).summary([p for p in plugins if p['id'] not in tracked])
             patch_mode['managed'] = list(dict.fromkeys(patch_mode['managed'] + list(tracked)))
             patch_mode['supported'] = patch_mode['supported'] or bool(tracked)
-            patch_mode['verifiedNative'] = patch_mode['verifiedNative'] and not any(r['enabled'] for r in tracking['records'].values())
+            patch_mode['verifiedNative'] = (patch_mode['verifiedNative'] and not tracking['pending']
+                                            and not tracking['session'] and not any(r['enabled'] for r in tracking['records'].values()))
             patch_mode['pending'] = patch_mode['pending'] or tracking['pending']
             for plugin in plugins:
                 plugin['tracking'] = ('builtin' if plugin['id'] == 'dsh-purge' else 'auto' if plugin['id'] in tracked else 'untracked')
@@ -317,6 +321,7 @@ class Manager:
                     "executableExists": exists,
                     "detectedExecutable": str(detected) if detected else None,
                     "schemes": self.settings["schemes"], "lastSelection": self.settings["lastSelection"],
+                    "schemeLocks": self.settings.get("schemeLocks", {}),
                     "backups": self.backup_list(), "patchApplied": applied and patch_mode['mode'] != 'native',
                     "patchMode": patch_mode,
                     "tracking": tracking,
@@ -335,9 +340,14 @@ class Manager:
     def backup(self, raw, bundles, reason):
         stamp = datetime.now().astimezone()
         key = stamp.strftime("%Y%m%d-%H%M%S-%f") + "-" + uuid.uuid4().hex[:6] + ".json"
+        selected = [x for x in bundles if x not in OFFICIAL]
+        plugins = self.discover(json.loads(raw.decode('utf-8-sig')), bundles)
+        lock = self.tracking.versions.lock(selected, plugins, self.tracking.load(),
+                                          file_hash(Path(self.settings['executable'])))
         write_json(self.data / "backups" / key, {"target": str(self.manifest_path),
+                   "format": 2,
                    "time": stamp.isoformat(timespec="seconds"), "reason": reason,
-                   "plugins": [x for x in bundles if x not in OFFICIAL],
+                   "plugins": selected, "lock": lock,
                    "content": raw.decode("utf-8-sig"), "bom": raw.startswith(b"\xef\xbb\xbf")})
         return key
 
@@ -345,68 +355,40 @@ class Manager:
         if running_harness():
             raise MenuError("Harness 正在运行。请先在托盘中完全退出，再应用或启动；不会强制结束你的会话。")
 
+    def is_running(self):
+        return bool(running_harness())
+
     def require_executable(self):
         # Patch switching and recording locate the install folder from this path.
         if not Path(self.settings["executable"]).is_file():
             raise MenuError("找不到 Harness 程序。补丁切换和安装记录需要准确的安装目录，请先在设置中修正应用路径。")
 
+    def validate_lock(self, lock, selection, plugins):
+        if not isinstance(lock, dict):
+            raise MenuError('方案或备份缺少新版版本记录，请先运行 migrate.py。')
+        expected = self.tracking.versions.lock(selection, plugins, self.tracking.load(),
+                                             file_hash(Path(self.settings['executable'])))
+        if lock != expected:
+            raise MenuError('此方案或备份记录的插件版本、应用顺序或 Harness 版本已变化。'
+                            '请检查后重新保存方案；历史配置不能套用到不同的插件版本。')
+
     def switch_layers(self, selection, plugins, before, after, native):
         tracker = self.tracking
         tracker.guard(check_files=True)
+        registered = set(tracker.load()['records'])
+        unknown = [p['id'] for p in plugins if p['id'] != 'dsh-purge' and p['id'] not in registered]
+        if unknown:
+            raise PatchError('这些插件缺少安装前记录，无法可靠切换文件组合：' + '、'.join(unknown) +
+                             '。请先恢复干净的安装，再通过启动器安装并自动记录；不能用安装后的快照补记。')
         tracker.check_versions(plugins, selection)
-        controller = PatchModes(self)
-        receipt = {'tracker': tracker, 'controller': controller, 'suspended': None,
-                   'core': None, 'activated': None, 'raw': before, 'plain_write': False,
-                   'mode': 'plugin' if selection else 'native', 'tracking_before': tracker.load()}
-        try:
-            if receipt['tracking_before']['records']:
-                moving = copy.deepcopy(receipt['tracking_before'])
-                moving['inSwitch'] = True
-                tracker.save(moving)
-            receipt['suspended'] = tracker.suspend()
-            registered = set(tracker.load()['records'])
-            receipt['core'] = controller.transition(selection, [p for p in plugins if p['id'] not in registered],
-                                                     before, after, strict_native=native)
-            if receipt['core'] is None and before != after:
-                atomic_write(self.manifest_path, after)
-                receipt['plain_write'] = True
-            receipt['activated'] = tracker.activate(selection)
-            if receipt['tracking_before']['records']:
-                tracker.seal_inventory()
-        except Exception as error:
-            try:
-                self.rollback_layers(receipt)
-            except Exception as rollback_error:
-                raise PatchError('组合切换未完成，请保留两类快照和日志：' + str(rollback_error)) from error
-            raise
-        return receipt
+        planner = SwitchPlan(tracker)
+        plan = planner.prepare(selection, plugins, before, after, native)
+        return planner.execute(plan)
 
     def rollback_layers(self, receipt):
-        receipt['tracker'].rollback(receipt['activated'])
-        if receipt['core']:
-            receipt['controller'].rollback(receipt['core'])
-        elif receipt['plain_write']:
-            atomic_write(self.manifest_path, receipt['raw'])
-        receipt['tracker'].rollback(receipt['suspended'])
-        receipt['tracker'].save(receipt['tracking_before'])
-        inventory_id = receipt['tracking_before'].get('inventory')
-        if inventory_id and receipt['core']:
-            inventory = receipt['tracker'].read_object(inventory_id)
-            # Built-in file rollback restores bytes, while generic inventories
-            # also preserve mtimes. Normalize only the known core transaction files.
-            for op in receipt['core']['operations']:
-                if op['kind'] != 'file':
-                    continue
-                path = Path(op['path'])
-                for scope, base in receipt['tracker'].scopes.items():
-                    if path == base or path.is_relative_to(base):
-                        relative = '.' if path == base else path.relative_to(base).as_posix()
-                        entry = inventory.get(scope + '|' + relative)
-                        if entry and entry[0] == 'file' and path.is_file():
-                            os.utime(path, ns=(entry[2], entry[2]))
-                        break
+        SwitchPlan(self.tracking).rollback(receipt)
 
-    def apply(self, selection, revision, launch=False, native=False):
+    def apply(self, selection, revision, launch=False, native=False, scheme=None):
         with self.lock:
             self.require_stopped()
             try:
@@ -419,6 +401,12 @@ class Manager:
             plugins = self.discover(obj, bundles)
             self.validate_selection(selection, plugins)
             self.require_executable()
+            if scheme is not None:
+                if not isinstance(scheme, str) or scheme not in self.settings['schemes']:
+                    raise MenuError('启动方案不存在，请刷新后重试。')
+                if set(self.settings['schemes'][scheme]) != set(selection):
+                    raise MenuError('所选插件与保存的方案不同，请刷新后重选。')
+                self.validate_lock(self.settings.get('schemeLocks', {}).get(scheme), selection, plugins)
             exe = Path(self.settings["executable"])
             # Always keep official components; preserve all other JSON fields.
             chosen = set(selection)
@@ -452,9 +440,7 @@ class Manager:
                         self.rollback_layers(receipt)
                     except Exception as rollback_error:
                         raise MenuError('启动失败且补丁回滚未完成：' + str(rollback_error)) from exc
-                elif changed:
-                    atomic_write(self.manifest_path, raw)
-                raise MenuError("启动失败，已恢复切换前配置：" + str(exc)) from exc
+                raise MenuError(("启动失败，已恢复切换前配置：" if receipt else "无法完成切换，已停止操作：") + str(exc)) from exc
             self.settings["order"] = [p["id"] for p in plugins]
             self.settings["lastSelection"] = list(selection)
             self.persist()
@@ -474,6 +460,8 @@ class Manager:
             info = read_json(self.data / "backups" / backup_id)
             if not info or info.get("target") != str(self.manifest_path):
                 raise MenuError("此备份不属于当前桌面配置。")
+            if info.get('format') != 2:
+                raise MenuError('备份需要先通过 migrate.py 转为新版格式。')
             try:
                 restored = json.loads(info["content"])
                 restored_bundles = restored["dsh"]["profile"]["bundles"]
@@ -494,6 +482,7 @@ class Manager:
             _, current_obj, current_bundles = self.manifest()
             plugins = self.discover(current_obj, current_bundles)
             self.validate_selection(selected, plugins)
+            self.validate_lock(info.get('lock'), selected, plugins)
             try:
                 receipt = self.switch_layers(selected, plugins, raw, payload, native and not selected)
             except PatchError as exc:
@@ -509,12 +498,17 @@ class Manager:
             name = name.strip()
             if delete:
                 self.settings["schemes"].pop(name, None)
+                self.settings.setdefault('schemeLocks', {}).pop(name, None)
             else:
+                self.require_executable()
                 if len(self.settings["schemes"]) >= 100 and name not in self.settings["schemes"]:
                     raise MenuError("最多保存 100 个方案。")
                 _, obj, bundles = self.manifest()
-                self.validate_selection(selection, self.discover(obj, bundles))
+                plugins = self.discover(obj, bundles)
+                self.validate_selection(selection, plugins)
                 self.settings["schemes"][name] = list(selection)
+                self.settings['schemeLocks'][name] = self.tracking.versions.lock(
+                    selection, plugins, self.tracking.load(), file_hash(Path(self.settings['executable'])))
             self.persist()
             return {"message": "方案已删除" if delete else "方案已保存"}
 
@@ -537,7 +531,7 @@ class Manager:
                 self.settings.update(home=str(candidate), executable=str(exe))
                 self.manifest()
                 if old["home"] != str(candidate):
-                    self.settings.update(schemes={}, order=[], lastSelection=None)
+                    self.settings.update(schemes={}, schemeLocks={}, order=[], lastSelection=None)
                 self.persist()
             except Exception:
                 self.settings = old
@@ -547,6 +541,7 @@ class Manager:
     def import_schemes(self, schemes):
         """Validate an entire import before writing anything."""
         with self.lock:
+            self.require_executable()
             if not isinstance(schemes, dict) or len(schemes) > 100:
                 raise MenuError("方案文件格式错误或超过 100 个方案。")
             _, obj, bundles = self.manifest()
@@ -562,7 +557,11 @@ class Manager:
             merged = {**self.settings["schemes"], **normalized}
             if len(merged) > 100:
                 raise MenuError("导入后将超过 100 个方案，请先移除不用的方案。")
+            locks = {name: self.tracking.versions.lock(ids, plugins, self.tracking.load(),
+                     file_hash(Path(self.settings['executable']))) for name, ids in normalized.items()}
             self.settings["schemes"] = merged
+            for name in normalized:
+                self.settings['schemeLocks'][name] = locks[name]
             self.persist()
             return {"message": f"已导入 {len(normalized)} 个方案"}
 
@@ -655,10 +654,10 @@ class Handler(BaseHTTPRequestHandler):
             self.error(exc)
 
     def error(self, exc):
-        if not isinstance(exc, (MenuError, CatalogError)):
+        if not isinstance(exc, (MenuError, CatalogError, PatchError)):
             logging.exception("Launcher operation failed")
-        self.reply(400 if isinstance(exc, (MenuError, CatalogError)) else 500,
-                   {"error": str(exc) if isinstance(exc, (MenuError, CatalogError)) else "操作失败，详情已记录在 launcher.log。"})
+        self.reply(400 if isinstance(exc, (MenuError, CatalogError, PatchError)) else 500,
+                   {"error": str(exc) if isinstance(exc, (MenuError, CatalogError, PatchError)) else "操作失败，详情已记录在 launcher.log。"})
 
     def do_POST(self):
         if not self.authorized():
@@ -677,7 +676,7 @@ class Handler(BaseHTTPRequestHandler):
             manager = self.server.manager
             if path in ("/api/apply", "/api/launch"):
                 result = manager.apply(body.get("selection"), body.get("revision"), launch=path.endswith("launch"),
-                                       native=body.get('native', False) is True)
+                                       native=body.get('native', False) is True, scheme=body.get('scheme'))
             elif path == "/api/scheme":
                 result = manager.scheme(body.get("name"), body.get("selection"), body.get("delete", False))
             elif path == "/api/restore":
@@ -692,14 +691,10 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if action == 'begin':
                         result = tracker.begin(body.get('name'), body.get('source', ''))
-                    elif action == 'finish':
-                        result = tracker.finish()
-                    elif action == 'accept':
-                        result = tracker.accept()
                     elif action == 'abandon':
                         result = tracker.abandon()
-                    elif action == 'launch':
-                        result = tracker.launch_training()
+                    elif action == 'retry':
+                        result = tracker.retry()
                     else:
                         raise MenuError('未知记录操作。')
                 except PatchError as exc:
@@ -788,17 +783,28 @@ def main():
     url = f"http://127.0.0.1:{server.server_port}/?token={server.token}"
     write_json(instance_path, {"url": url, "pid": os.getpid()})
 
+    monitor_stop = threading.Event()
+
+    def supervise():
+        while not monitor_stop.wait(1):
+            try:
+                server.manager.tracking.tick()
+            except Exception:
+                logging.exception('Automatic installation supervisor failed; records retained')
+
     def expire():
-        while time.monotonic() - server.last_seen < 300 or server.manager.tracking.busy:
+        while time.monotonic() - server.last_seen < 300 or server.manager.tracking.active():
             time.sleep(10)
         server.shutdown()
 
     threading.Thread(target=expire, daemon=True).start()
+    threading.Thread(target=supervise, daemon=True).start()
     if not args.no_open:
         open_window(url)
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
+        monitor_stop.set()
         server.server_close()
         try:
             if read_json(instance_path, {}).get("pid") == os.getpid():

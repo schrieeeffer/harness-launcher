@@ -47,13 +47,15 @@ def put(path, data):
         temp.unlink(missing_ok=True)
 
 
-def tree_hash(root):
+def tree_hash(root, view=None):
     """Fast change fingerprint: metadata for files, targets for junctions.
 
     The official archive is verified by content separately. Reading every DLL/JS
     in the extracted tree triggers very slow per-file antivirus scans on Windows;
     size/mtime/identity detect normal edits without opening thousands of files.
     """
+    if view is not None:
+        return view.tree_hash(root)
     if not root.is_dir() or root.is_symlink() or root.is_junction():
         raise PatchError(f'补丁目录不可用或被替换为链接：{root}')
     h = hashlib.sha256()
@@ -76,10 +78,10 @@ def tree_hash(root):
     return h.hexdigest()
 
 
-def archive_info(archive, unpacked, verify=False):
+def archive_info(archive, unpacked, verify=False, view=None):
     """Read ASAR without executing its code. Validate shipped integrity records."""
     try:
-        with archive.open('rb') as stream:
+        with (view.open(archive) if view else archive.open('rb')) as stream:
             header = struct.unpack('<4I', stream.read(16))
             if header[0] != 4 or not (0 < header[3] < 32 * 1024 * 1024):
                 raise ValueError('header')
@@ -100,7 +102,7 @@ def archive_info(archive, unpacked, verify=False):
                     continue
                 if value.get('unpacked'):
                     path = unpacked.joinpath(*name.split('/'))
-                    content = path.read_bytes()
+                    content = view.read_bytes(path) if view else path.read_bytes()
                 else:
                     stream.seek(base + int(value['offset']))
                     content = stream.read(value['size'])
@@ -120,6 +122,33 @@ def archive_info(archive, unpacked, verify=False):
         raise PatchError('无法验证保留的官方 app.asar，未修改应用。') from exc
 
 
+def archive_file(archive, name, unpacked, view=None):
+    """Read one host-provided package manifest without executing Electron."""
+    try:
+        with (view.open(archive) if view else archive.open('rb')) as stream:
+            header = struct.unpack('<4I', stream.read(16))
+            if header[0] != 4 or not 0 < header[3] < 32 * 1024 * 1024:
+                raise ValueError('header')
+            node = json.loads(stream.read(header[3]))
+            for part in name.split('/'):
+                if part in ('', '.', '..'):
+                    raise ValueError('path')
+                node = node['files'][part]
+            if node.get('unpacked'):
+                path = unpacked.joinpath(*name.split('/'))
+                content = view.read_bytes(path) if view else path.read_bytes()
+            else:
+                stream.seek(8 + header[1] + int(node['offset']))
+                content = stream.read(node['size'])
+            integrity = node.get('integrity')
+            if len(content) != node['size'] or (integrity and
+                    (integrity.get('algorithm') != 'SHA256' or sha(content) != integrity['hash'])):
+                raise ValueError('integrity')
+            return content
+    except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
+        raise PatchError('无法验证 Harness 提供的依赖：' + name) from exc
+
+
 class PatchModes:
     def __init__(self, manager):
         self.manager = manager
@@ -133,16 +162,23 @@ class PatchModes:
         self.stash = self.resources / ('.harness-launcher-' + key)
         self.home_stash = self.home / ('.harness-launcher-' + key)
 
+    def official_archive(self, view=None):
+        # Capture and switching must agree when plugin mode has parked the ASAR.
+        candidates = (self.archive, self.stash / 'official.asar', self.resources / 'app.asar.bak')
+        return next((path for path in candidates if (view.is_file(path) if view else path.is_file())), None)
+
     def load(self):
         if not self.record.is_file():
             return None
         try:
             state = json.loads(self.record.read_text(encoding='utf-8'))
+            if state.get('format') != 2 or not state.get('package') or not state.get('revision') or state.get('pending'):
+                raise ValueError()
             if state['resources'] != str(self.resources) or state['home'] != str(self.home):
                 raise ValueError()
             return state
         except (OSError, ValueError, KeyError):
-            raise PatchError('补丁切换记录损坏，请保留 patches 目录以便恢复。')
+            raise PatchError('补丁记录需要迁移或已损坏，请先运行 migrate.py 并保留 patches 目录。')
 
     def save(self, state):
         put(self.record, (json.dumps(state, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
@@ -161,7 +197,10 @@ class PatchModes:
             return None
         if not re.fullmatch('[a-f0-9]{64}', key):
             raise PatchError('补丁快照编号无效。')
-        content = (self.root / 'blobs' / key).read_bytes()
+        try:
+            content = (self.root / 'blobs' / key).read_bytes()
+        except OSError as exc:
+            raise PatchError('内置补丁快照缺失或无法读取，未覆盖应用。') from exc
         if sha(content) != key:
             raise PatchError('补丁快照校验失败，未覆盖应用。')
         return content
@@ -172,12 +211,11 @@ class PatchModes:
             known = any(p['id'] == 'dsh-purge' for p in plugins)
             unknown = [p['id'] for p in plugins if p['id'] != 'dsh-purge']
             return {'supported': known or state is not None, 'mode': state['mode'] if state else 'unmanaged',
-                    'verifiedNative': bool(state and state['mode'] == 'native' and not state.get('pending')
+                    'verifiedNative': bool(state and state['mode'] == 'native'
                                            and self.archive.is_file() and not self.app.exists() and not unknown),
-                    'pending': bool(state and state.get('pending')), 'unknown': unknown,
+                    'pending': False, 'unknown': unknown,
                     'managed': ['dsh-purge'] if known or state else [],
-                    'archiveAvailable': self.archive.is_file() or (self.stash / 'official.asar').is_file()
-                                        or (self.resources / 'app.asar.bak').is_file(), 'error': ''}
+                    'archiveAvailable': self.official_archive() is not None, 'error': ''}
         except PatchError as exc:
             return {'supported': True, 'mode': 'error', 'verifiedNative': False, 'pending': False,
                     'unknown': [], 'managed': [], 'archiveAvailable': False, 'error': str(exc)}
@@ -200,15 +238,15 @@ class PatchModes:
             raise PatchError('文件不属于已适配的补丁目标：' + str(path))
         return path
 
-    def file_op(self, path, desired):
+    def file_op(self, path, desired, view=None):
         self.safe(path)
-        before = path.read_bytes() if path.is_file() else None
+        before = view.read_bytes(path) if view and view.is_file(path) else path.read_bytes() if not view and path.is_file() else None
         return {'kind': 'file', 'path': str(path), 'before': self.blob(before), 'after': self.blob(desired)}
 
-    def move_op(self, source, dest):
+    def move_op(self, source, dest, view=None):
         self.safe(source)
         self.safe(dest)
-        if not source.exists() or dest.exists():
+        if not (view.exists(source) if view else source.exists()) or (view.exists(dest) if view else dest.exists()):
             raise PatchError('切换目录存在冲突，未覆盖任何目录：' + str(dest))
         return {'kind': 'move', 'source': str(source), 'dest': str(dest)}
 
@@ -243,48 +281,50 @@ class PatchModes:
             else:
                 raise PatchError('未知的补丁日志操作。')
 
-    def capture(self, plugins):
+    def capture(self, plugins, view=None, persist=True):
         purge = next((p for p in plugins if p['id'] == 'dsh-purge' and p['available']), None)
         if not purge:
             raise PatchError('找不到 dsh-purge，无法建立可逆补丁快照。')
         if any(p['enabled'] and p['id'] != 'dsh-purge' for p in plugins):
             raise PatchError('首次建立补丁快照时存在其他已启用插件，无法确认目录归属。请先完成这些插件的还原适配。')
-        archive = self.archive if self.archive.is_file() else self.resources / 'app.asar.bak'
-        info = archive_info(archive, self.resources / 'app.asar.unpacked', verify=True)
-        if not self.app.is_dir():
+        archive = self.official_archive(view)
+        if archive is None:
+            raise PatchError('找不到保留的官方 app.asar。请确认 Harness 安装路径，并保留现有补丁记录与暂存目录。')
+        info = archive_info(archive, self.resources / 'app.asar.unpacked', verify=True, view=view)
+        if not (view.is_dir(self.app) if view else self.app.is_dir()):
             raise PatchError('尚无已应用的插件补丁目录。请先在 dsh-purge 中完成一次应用，再使用自动切换。')
-        app_package = json.loads((self.app / 'package.json').read_text(encoding='utf-8'))
+        app_package = json.loads(view.read_bytes(self.app / 'package.json') if view else (self.app / 'package.json').read_bytes())
         if app_package.get('version') != info['version'] or app_package.get('dshBuildCommit', '') != info['commit']:
             raise PatchError('补丁目录与官方归档的版本不同，不能自动切换。')
         files = []
         # Only known plugin-owned injection files; never read credentials/sessions.
         active = None
         rules_state = self.home / 'rules' / 'state.json'
-        if rules_state.is_file():
-            active = json.loads(rules_state.read_text(encoding='utf-8')).get('active')
+        if view.is_file(rules_state) if view else rules_state.is_file():
+            active = json.loads(view.read_bytes(rules_state) if view else rules_state.read_bytes()).get('active')
         active_rule = None
         if isinstance(active, str) and re.fullmatch('[a-zA-Z0-9_-]+', active):
             rule_path = self.home / 'rules' / (active + '.md')
-            if rule_path.is_file():
-                active_rule = rule_path.read_bytes()
+            if view.is_file(rule_path) if view else rule_path.is_file():
+                active_rule = view.read_bytes(rule_path) if view else rule_path.read_bytes()
         for name in ['prompt-inject.md', 'AGENTS.md', 'CLAUDE.md']:
             path = self.home / name
-            if not path.is_file():
+            if not (view.is_file(path) if view else path.is_file()):
                 continue
-            content = path.read_bytes()
+            content = view.read_bytes(path) if view else path.read_bytes()
             backup = path.with_name(path.name + '.dsh-purge-rule.bak')
-            owned = (name == 'prompt-inject.md' or backup.is_file() or content == active_rule
+            owned = (name == 'prompt-inject.md' or (view.is_file(backup) if view else backup.is_file()) or content == active_rule
                      or b'Little Code Sauce' in content or b'UNRESTRICTED SANDBOX' in content)
             if owned:
-                original = backup.read_bytes() if backup.is_file() else None
+                original = (view.read_bytes(backup) if view else backup.read_bytes()) if (view.is_file(backup) if view else backup.is_file()) else None
                 files.append({'path': str(path), 'initial': self.blob(content),
                               'plugin': self.blob(content), 'native': self.blob(original)})
         # Desktop CLI repair is outside resources/app; preserve both versions.
         cli = self.resources / 'runtime' / 'cli' / 'bin' / 'dsh.cmd'
         backup = cli.with_name(cli.name + '.dsh-purge.bak')
-        if cli.is_file():
-            initial_cli = cli.read_bytes()
-            original_cli = backup.read_bytes() if backup.is_file() else initial_cli
+        if view.is_file(cli) if view else cli.is_file():
+            initial_cli = view.read_bytes(cli) if view else cli.read_bytes()
+            original_cli = (view.read_bytes(backup) if view else backup.read_bytes()) if (view.is_file(backup) if view else backup.is_file()) else initial_cli
             if b'ELECTRON_RUN_AS_NODE' not in original_cli or b'dsh-desktop-host' not in original_cli:
                 raise PatchError('桌面 CLI 包装脚本不是受支持的官方格式，未修改脚本。')
             original_cli = original_cli.replace(b'\\app\\', b'\\app.asar\\')
@@ -293,17 +333,19 @@ class PatchModes:
                           'plugin': self.blob(patched_cli), 'native': self.blob(original_cli)})
         preset = self.home / '.agent-presets' / 'redteam'
         directories = []
-        if preset.is_dir():
+        if view.is_dir(preset) if view else preset.is_dir():
             directories.append({'active': str(preset), 'parked': str(self.home_stash / 'redteam'),
-                                'hash': tree_hash(preset)})
-        state = {'format': 1, 'resources': str(self.resources), 'home': str(self.home),
-                 'mode': 'legacy', 'pluginVersion': purge['version'], 'archiveHash': file_hash(archive),
-                 'archiveInfo': info, 'initialArchive': str(archive), 'treeHash': tree_hash(self.app),
-                 'files': files, 'directories': directories, 'pending': None}
-        self.save(state)
+                                'hash': tree_hash(preset, view)})
+        state = {'format': 2, 'resources': str(self.resources), 'home': str(self.home),
+                 'mode': 'captured', 'pluginVersion': purge['version'], 'archiveHash': (view.hash(archive) if view else file_hash(archive)),
+                 'archiveInfo': info, 'initialArchive': str(archive), 'treeHash': tree_hash(self.app, view),
+                 'files': files, 'directories': directories}
+        state = self.manager.tracking.versions.bind_adapter(state)
+        if persist:
+            self.save(state)
         return state
 
-    def transition(self, selection, plugins, before, after, strict_native=False):
+    def prepare(self, selection, plugins, before, after, strict_native=False, view=None):
         state = self.load()
         purge = next((p for p in plugins if p['id'] == 'dsh-purge'), None)
         unknown = [p['id'] for p in plugins if p['id'] != 'dsh-purge']
@@ -312,87 +354,62 @@ class PatchModes:
         if strict_native:
             for filename in ['cordis.yml', 'cordis.patch.yml']:
                 path = self.manager.profile / filename
-                if not path.is_file():
+                if not (view.is_file(path) if view else path.is_file()):
                     continue
-                source = '\n'.join(line for line in path.read_text(encoding='utf-8-sig').splitlines()
+                source = '\n'.join(line for line in (view.read_bytes(path).decode('utf-8-sig') if view else path.read_text(encoding='utf-8-sig')).splitlines()
                                    if not line.lstrip().startswith('#'))
                 names = re.findall(r'''(?m)^\s*(?:-\s*)?name:\s*["']?([^\s"'#]+)''', source)
                 if '!!js' in source or any(not name.startswith('@deepseek-ai/') for name in names):
                     raise PatchError('用户 YAML 配置包含额外插件或动态表达式，无法验证原生模式：' + filename)
         if not state and not purge:
-            if strict_native and self.app.exists():
+            if strict_native and (view.exists(self.app) if view else self.app.exists()):
                 raise PatchError('存在未受管理的 resources/app，无法验证原生状态。')
             return None
         if not state:
-            state = self.capture(plugins)
-        if state.get('pending'):
-            self.replay(state['pending']['operations'], undo=True)
-            state['pending'] = None
-            self.save(state)
-            raise PatchError('上次中断的切换已回滚。请刷新页面后重试。')
+            state = self.capture(plugins, view=view, persist=False)
+        self.manager.tracking.versions.verify_adapter(state)
         desired = 'plugin' if 'dsh-purge' in selection else 'native'
         if purge and purge['version'] != state['pluginVersion']:
             raise PatchError('dsh-purge 已升级，旧补丁快照已停用。需在新版本上重新建立快照。')
-        official = self.archive if self.archive.is_file() else self.stash / 'official.asar'
-        if not official.is_file():
-            official = self.resources / 'app.asar.bak'
-        if file_hash(official) != state['archiveHash']:
+        official = self.official_archive(view)
+        if official is None or (view.hash(official) if view else file_hash(official)) != state['archiveHash']:
             raise PatchError('Harness 官方归档已更新或被修改，已停止使用旧补丁快照。')
         operations = []
-        app_at = self.app if self.app.exists() else self.stash / 'app'
-        if tree_hash(app_at) != state['treeHash']:
+        app_at = self.app if (view.exists(self.app) if view else self.app.exists()) else self.stash / 'app'
+        if tree_hash(app_at, view) != state['treeHash']:
             raise PatchError('补丁目录有新改动或其他插件写入，已停止切换以保护这些修改。')
         for item in state['files']:
-            actual = file_hash(Path(item['path']))
-            expected = item['native'] if state['mode'] == 'native' else item.get('initial', item['plugin']) if state['mode'] == 'legacy' else item['plugin']
+            actual = (view.hash(Path(item['path'])) if view else file_hash(Path(item['path'])))
+            expected = item['native'] if state['mode'] == 'native' else item.get('initial', item['plugin']) if state['mode'] == 'captured' else item['plugin']
             if actual != expected:
                 raise PatchError('插件注入文件已被修改，需重新建立快照：' + item['path'])
         for item in state['directories']:
             at = Path(item['parked'] if state['mode'] == 'native' else item['active'])
-            if tree_hash(at) != item['hash']:
+            if tree_hash(at, view) != item['hash']:
                 raise PatchError('插件预设已被修改，未覆盖现有预设。')
         if desired == 'native':
-            if self.app.exists():
-                operations.append(self.move_op(self.app, self.stash / 'app'))
+            if (view.exists(self.app) if view else self.app.exists()):
+                operations.append(self.move_op(self.app, self.stash / 'app', view))
             if official != self.archive:
-                operations.append(self.move_op(official, self.archive))
+                operations.append(self.move_op(official, self.archive, view))
         else:
             if official != self.stash / 'official.asar':
-                operations.append(self.move_op(official, self.stash / 'official.asar'))
-            if not self.app.exists():
-                operations.append(self.move_op(self.stash / 'app', self.app))
+                operations.append(self.move_op(official, self.stash / 'official.asar', view))
+            if not (view.exists(self.app) if view else self.app.exists()):
+                operations.append(self.move_op(self.stash / 'app', self.app, view))
         for item in state['files']:
-            operations.append(self.file_op(Path(item['path']), self.bytes(item[desired])))
+            operations.append(self.file_op(Path(item['path']), self.bytes(item[desired]), view))
         for item in state['directories']:
             source = Path(item['active'] if desired == 'native' else item['parked'])
             dest = Path(item['parked'] if desired == 'native' else item['active'])
-            if source.exists():
-                operations.append(self.move_op(source, dest))
-            elif not dest.exists():
+            if view.exists(source) if view else source.exists():
+                operations.append(self.move_op(source, dest, view))
+            elif not (view.exists(dest) if view else dest.exists()):
                 raise PatchError('插件预设目录缺失。')
         manifest = self.manager.manifest_path
-        if manifest.read_bytes() != before:
+        if (view.read_bytes(manifest) if view else manifest.read_bytes()) != before:
             raise PatchError('配置在校验期间被更改，请刷新后重试。')
         if before != after:
-            operations.append(self.file_op(manifest, after))
-        previous = dict(state)
-        state['pending'] = {'target': desired, 'operations': operations}
-        self.save(state)
-        try:
-            self.replay(operations)
-        except Exception as original_error:
-            try:
-                self.replay(operations, undo=True)
-                self.save(previous)
-            except Exception as rollback_error:
-                raise PatchError('切换失败且回滚未完成，请保留补丁目录和日志：' + str(rollback_error)) from original_error
-            raise PatchError('切换失败，已恢复之前的文件和配置：' + str(original_error)) from original_error
-        state['mode'] = desired
-        state['pending'] = None
-        self.save(state)
-        return {'previous': previous, 'operations': operations, 'mode': desired}
-
-    def rollback(self, receipt):
-        if receipt:
-            self.replay(receipt['operations'], undo=True)
-            self.save(receipt['previous'])
+            operations.append(self.file_op(manifest, after, view))
+        target = dict(state, mode=desired)
+        return {'previous': state, 'state': target, 'operations': operations, 'mode': desired}

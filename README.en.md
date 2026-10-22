@@ -5,14 +5,14 @@
 # Harness Launcher
 
 **A local plugin launcher for DeepSeek Harness**<br>
-Choose which plugins to load on each launch, discover official and community plugins, and record and restore plugin patches in a way you can review.
+Choose which plugins to load on each launch, discover official and community plugins, and automatically record and verify installation changes for file restoration.
 
 [![Tests](https://github.com/schrieeeffer/harness-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/schrieeeffer/harness-launcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.1.0%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.2.0%20preview-orange.svg)
 
 [简体中文](README.md) · **English**
 
@@ -64,17 +64,31 @@ Harness Launcher addresses this with a local web interface. You pick plugins bef
 | Feature | Description |
 | --- | --- |
 | **Launch combinations** | Toggle installed plugins one by one, jump to the current configuration, native mode or all plugins, and save a combination as a scheme for one-click reuse. |
-| **Safe switching** | Backs up `package.json` before changes. Refuses to switch while Harness is running, when the configuration was modified externally, or when the executable path is invalid. Rolls back automatically on failure. |
+| **Safe switching** | Back up configuration, preflight the whole combination and verify native base, versions, dependencies and conflicts; one transaction supports failure and crash recovery. |
+| **Versions and combinations** | Retain installed code/dependencies, immutable revisions and combination records with content deduplication; read only the current data format; convert previous data once with a separate migration tool. |
 | **Patch restoration** | dsh-purge uses a built-in adapter. Other plugins are recorded as file differences between before- and after-install snapshots, restored when disabled and re-applied when enabled. |
 | **Plugin discovery** | Browse DeepSeek's official bundles, npm community packages and GitHub repositories with the `dsh-plugin` topic, with search, source filters, paging and a mainland China mirror option. |
 | **Leaderboards** | Rank plugins by npm downloads over the last 7 days, plus a "rising" board that surfaces new plugins. |
-| **Manual install** | Install from an npm package, a local folder or a Git repository, or install inside Harness yourself. Everything is recorded and saved after your review. |
+| **Manual install** | Install from npm, a local folder or Git, or inside Harness yourself. Recording is mandatory and is verified and saved automatically after normal use and exit. |
 | **Patch records** | See which plugins are recorded, which use a built-in adapter and which are unrecorded, and whether each can be restored. Recorded plugins can be upgraded and re-recorded. |
 | **Configuration backups** | An automatic backup before every change. Restore any of them; the current state is backed up again first. |
 | **Scheme import and export** | Back up or share schemes as a JSON file, with a per-scheme preview before importing. |
 | **No dependencies, local only** | Uses only the Python standard library and your local browser. The service listens on `127.0.0.1` only and uses a random access token on every start. |
 
 ## Getting started
+
+### Upgrading to 0.2.0
+
+0.2.0 uses one current record format and removes old index, switch-journal and manual-confirmation runtime branches. Finish incomplete recordings/recoveries in the previous version, fully quit Harness and the launcher service, then run in the project folder:
+
+```powershell
+python migrate.py
+python migrate.py --apply
+```
+
+The first command prepares and validates; the second replaces metadata. The tool preserves installed plugin versions, enabled choices and live application files, and archives original indexes, settings and configuration backups under `migrations/` in the launcher data directory. Missing historical artifacts are never fabricated. Old configuration backups bind the versions installed at migration time; they are not historical-version downgrades. Incomplete work, unknown file changes or missing original snapshots stop conversion.
+
+Fresh installations without old data need no migration. Updating the launcher does not automatically update plugin packages or require maintaining two launcher versions.
 
 ### Requirements
 
@@ -104,7 +118,7 @@ No pip or npm packages are needed.
 3. After that, double-click **`launch.vbs`** to start without a console window. It prefers the `pythonw.exe` bundled with Harness (found from the saved application path or `DSH_EXECUTABLE`) and falls back to `pythonw.exe` on `PATH`. You can create a desktop shortcut to `launch.vbs`.
 
 > [!TIP]
-> Double-clicking `launch.vbs` again does not start a second service; it reopens the one already running. The background service exits about 5 minutes after the last launcher window closes, or after any running snapshot or install job finishes.
+> Double-clicking `launch.vbs` reuses the existing service. Installation and first-run recording continue after the menu closes. The roughly five-minute idle timeout resumes after automatic saving; exceptions are retained for the next visit.
 
 ### First-time setup
 
@@ -163,7 +177,7 @@ Card badges:
 | `v1.2.3` | Version from `package.json`; shows "版本未知" (version unknown) if it cannot be read. |
 | **支持自动还原补丁** (supports automatic restore) | Managed by a built-in adapter (currently dsh-purge); official files can be restored when it is disabled. |
 | **已自动记录补丁** (patch recorded) | Snapshotted when installed through manual add; recorded files are restored when disabled and re-applied when enabled. |
-| **未记录安装前状态** (no pre-install record) | No snapshot was taken before installation. Disabling only stops it from loading and **cannot guarantee** that files it wrote are restored. |
+| **未记录安装前状态** (no pre-install record) | Combination switching is blocked. Restore a clean installation first, then install through the launcher with recording; unknown past changes cannot be inferred. |
 | **当前已启用** (currently enabled) | Loaded by the current `package.json`. |
 | **文件缺失** (files missing) | Registered, but its folder or `package.json` is missing; it cannot be enabled. |
 
@@ -181,6 +195,8 @@ The sidebar's **Quick select** (快速选择) section has three presets:
 
 **My schemes** (我的方案) stores combinations you use often. Click **Save as scheme** (保存为方案) or the sidebar's **+**, then enter a name of 1–40 characters to save the current selection; you are asked before an existing scheme with the same name is overwritten. Clicking a scheme loads it into the pending selection; hover over it to reveal **×** for deleting it. If a scheme contains plugins that are no longer installed, they are listed when it loads. Up to 100 schemes can be saved.
 
+Newly saved schemes also pin current plugin and Harness versions. Inspect and re-save after a version change to avoid silently substituting new plugins. Portable imports bind local installed versions; convert old schemes once with the migration tool.
+
 <img src="docs/images/scheme-save.png" alt="Save scheme dialog" width="520">
 
 ### Launch, apply and restore native
@@ -197,7 +213,7 @@ When applying, the launcher:
 2. Checks that `package.json` has not been changed by Harness or another program since it was read. If it has, you are asked to refresh and try again; external edits are never overwritten.
 3. Backs up `package.json`.
 4. Computes the new bundle list. Official components are always kept, existing plugins keep their load order, and newly enabled plugins are appended. All other fields of `package.json` are preserved.
-5. Switches patch layers. First it undoes all enabled recorded layers in reverse install order, then the built-in adapter switches dsh-purge and writes the new `package.json`, and finally the recorded layers of the plugins to enable are re-applied in install order.
+5. Simulates the entire switch in a read-only view, verifying bidirectional copies, the native base, plugin dependencies and target files, then rechecks inputs. One transaction undoes current layers, switches the adapter and configuration, applies target layers and verifies the final result. Failed preflight leaves live files untouched.
 6. If you chose to launch, starts Harness with `DSH_HOME` pointing at the current data directory. If any step fails, everything rolls back to the state before the switch.
 
 The panel's status line shows the current situation: in sync with the current configuration (与当前配置一致), pending (待应用 · 同步插件与补丁), quit Harness first (切换前请完全退出 Harness), executable not found (未找到 Harness 程序), or switching in progress (正在校验与切换补丁…).
@@ -281,7 +297,7 @@ npm details pin the version that was looked up, for example `@demo/dsh-desk-pet@
 
 ### Add a plugin manually (with recording)
 
-**Add manually** (手动添加) is where you install new plugins and upgrade recorded ones. The whole install is recorded: a snapshot before installing, a scan of the differences after installing and testing, and a save after you review them. Once saved, the plugin can be disabled (restored) and enabled (re-applied) at any time.
+**Add manually** (手动添加) installs new plugins and upgrades recorded ones. **Restoration recording is always enabled and cannot be skipped.** The launcher backs up files, installs the plugin and opens Harness. After normal use and exit it compares, verifies and saves automatically. There is no routine test confirmation, manual scan or save button.
 
 **Step 1: choose a source**
 
@@ -296,27 +312,29 @@ npm details pin the version that was looked up, for example `@demo/dsh-desk-pet@
 
 The package name must match the package that ends up installed, or you are told it cannot be found after installation. Install URLs must not contain credentials; use your package manager's configured authentication instead.
 
-**Steps 2–3: snapshot, install and test**
+**Steps 2–3: automatic backup, installation and first run**
 
-After you click **Take snapshot and start** (建立快照并开始), the launcher snapshots the files in the recorded scope. The first snapshot copies many files and may take a while; later ones reuse unchanged content. It then runs the official installer, or waits for you if you chose to install it yourself.
+Fully quit Harness, including its tray process, before starting. Check the source, then click **Install and open Harness** (安装并打开 Harness). The launcher backs up the files, uses the official installer, and opens Harness. With "install it yourself", the button reads **Back up and open Harness** (备份并打开 Harness); install or upgrade that plugin inside Harness once it opens. File copies are deduplicated by their content hash and the originals are retained.
 
-<img src="docs/images/add-recording.png" alt="Recording in progress: step 3 install and test, showing snapshot file count and size" width="640">
+<img src="docs/images/add-recording.png" alt="Automatic first-run recording, without manual scan or save controls" width="640">
 
-During the "record install and first test" stage:
+Use the plugin normally in Harness; you do not need to return and confirm a test. When finished, **fully quit Harness, including the tray process**. The background supervisor waits for the process to exit and files to settle, then records first-run changes automatically.
 
-- **Launch and test** (启动并测试插件) adds the plugin to the bundle list (backing up the configuration first) and starts Harness. Try the plugin and apply its own settings.
-- When done, **fully quit Harness, including the tray icon**, then click **Quit, scan differences** (已退出，扫描差异).
-- **Abandon, keep as is** (放弃记录，保留现状) ends the recording but leaves everything that was installed and changed in place; the plugin counts as unrecorded.
+You may close the menu window while recording continues. Until it finishes, only work with this plugin; do not install other plugins or manually edit managed files. Recording is not a functional test and does not prove the plugin is bug-free.
 
-While recording, a progress banner appears at the top of the main window and a dot appears next to **Add manually** in the sidebar; the launch and apply buttons are disabled for the duration. Closing the window does not cancel an installer that is already running.
+While recording, a progress banner and a sidebar dot show the current task. Launch and apply stay disabled until the record is saved.
 
 <img src="docs/images/recording-banner.png" alt="Progress banner at the top of the main window during recording" width="100%">
 
-**Step 4: review changes**
+**Step 4: automatic verification and saving, with intervention only on exceptions**
 
-After the scan, the list shows every file difference in the recording window (up to 200 items; **Export full change list** (导出完整变更清单) saves all of them as JSON). When you are confident the changes come from this plugin, click **Confirm and save record** (确认归属并保存记录).
+Before saving, the launcher rechecks installed plugins, versions, the loading combination, the Harness executable and the entire managed scope, and verifies file copies needed for both restoration and reapplication. It saves automatically if these checks pass, without a routine confirmation dialog.
 
-<img src="docs/images/add-review.png" alt="Review changes: modified and added files" width="640">
+Installer failure, an unobserved launch, program or other-plugin version changes, interrupted recording, ongoing writes, link/type transitions or corrupt snapshots pause the flow and retain the original backup. Fix the reported issue, quit Harness and click **Continue automatic recording** (继续自动记录). An unfinished session from a restarted service also requires checking before it continues, rather than silently adopting changes made while the service was down. Retrying keeps the original baseline.
+
+On an exception, inspect up to 200 collected changes or **Export full change list** (导出完整改动清单). Cancellation is allowed only if the plugin has not been installed and files remain unchanged; there is no discard-record bypass once changes exist.
+
+<img src="docs/images/add-review.png" alt="Exception handling: preserve the backup and continue after fixing the issue" width="640">
 
 Each entry has the form `scope|relative path`, where `|.` means the scope itself. For example, `rules|desk-pet.md` is `rules\desk-pet.md` in the data directory, and `archive|.` is the `resources\app.asar` file itself.
 
@@ -331,7 +349,9 @@ Each entry has the form `scope|relative path`, where `|.` means the scope itself
 > [!IMPORTANT]
 > A record captures the file differences **within a time window**; it does not prove the plugin's process wrote them. While recording, install and test only this one plugin and do not edit other files. A plugin that is already installed without a pre-install record cannot have its past changes recovered.
 
-**Upgrading a recorded plugin:** click **Upgrade / re-record** (升级 / 重新记录) in patch records, or **Prepare upgrade and re-record** in the plugin details. The launcher first undoes the old version's patches, then takes a new baseline. The new record replaces the current one only after you confirm it, and the old record is kept as history. Old files the new version no longer writes are not carried over.
+**Upgrading a recorded plugin:** click **Upgrade / re-record** (升级 / 重新记录) in patch records, or **Prepare upgrade and re-record** in plugin details. The launcher undoes the old patches and takes a new baseline. The new record replaces the current one only after automatic verification; the old record stays in history. Old files the new version no longer writes are not carried over.
+
+New records also retain installed package contents, resolvable dependencies, existing lock files and immutable revision references. Convert old records once into the current format and retain current installed artifacts. Missing historical artifacts are never fabricated. Switches record concrete versions, order, the native base and expected output. This phase has no one-click historical-version installation or automatic patch merging.
 
 ### Patch records
 
@@ -339,18 +359,18 @@ Each entry has the form `scope|relative path`, where `|.` means the scope itself
 
 - **Recorded** (已记录): version, number of differences, whether the patch is enabled, the base combination at recording time, and the number of history entries. Can be upgraded and re-recorded.
 - **Built-in adapter** (内置适配): dsh-purge is restored by the launcher's dedicated adapter. Disabling uses the preserved official archive and stashes injected files; enabling restores the patch snapshot for the same version. It must be re-verified after an upgrade.
-- **Unrecorded** (未记录): plugins installed without a snapshot. Disabling only stops them from loading and cannot guarantee that files they wrote are restored.
+- **Unrecorded** (未记录): plugins without an original snapshot block combination switching. Restore a clean installation first, then install with automatic recording.
 
-Expand **Recorded scope and limits** (记录范围与限制) at the bottom to see the folders actually monitored on your machine. If a recording is in progress, its progress and a **Continue** (继续) button appear at the top.
+Expand **Recorded scope and limits** (记录范围与限制) for the monitored folders. An active recording has a **View progress** (查看进度) button; an exception has **Handle issue** (处理问题).
 
-<img src="docs/images/patch-records.png" alt="Patch records: recorded, built-in adapter and unrecorded groups" width="640">
+<img src="docs/images/patch-records.png" alt="Automatically saved restoration records and the upgrade entry point" width="640">
 
 ### Configuration backups
 
 Before every change to `package.json`, the launcher saves a backup and notes why, for example "before launch switch" (启动前切换), "save plugin selection" (保存插件选择) or "before restoring a backup" (恢复备份前). **Configuration backups** (配置备份) lets you restore any of them:
 
 - The current configuration is backed up first, so a restore can itself be undone.
-- Restoring also syncs the patch state of adapted plugins, but **does not roll back plugin versions**.
+- Restoring also syncs the patch state of adapted plugins, but **does not roll back plugin versions**. Version-constraint mismatches stop restoration; convert old backups with the migration tool first.
 - Restoring is unavailable while Harness is running, the executable path is invalid, or a recording is in progress.
 - **Open backup folder** (打开备份目录) opens the backups in File Explorer.
 
@@ -382,7 +402,7 @@ Use **Settings → Schemes and files**. The exported file is UTF-8 JSON that you
 - Each key in `schemes` is a scheme name of 1–40 characters, and each value is the list of extra plugin package names to load. An empty list means only the official base components. Official components do not need to be listed.
 - Files are limited to 64 KB and 100 schemes, and the total after importing cannot exceed 100.
 - Before importing, each scheme is previewed as **new** (新增), **overwrite** (覆盖, same name as an existing scheme) or **skipped** (跳过). Schemes that reference plugins that are not installed, or whose files are missing, are skipped and the missing plugins are listed. Install them and import the same file again.
-- Importing only updates the launcher's scheme list. It does not modify the Harness configuration or install plugins.
+- Importing only updates the launcher's scheme list. It does not modify the Harness configuration or install plugins. Exports contain package names only, not local version constraints or recovery artifacts; imports bind the current local versions again.
 - Schemes are stored in the launcher settings (by default `%LOCALAPPDATA%\HarnessLauncher\settings.json`).
 
 <img src="docs/images/import-preview.png" alt="Import preview: one overwrite, two new, and one scheme skipped because of a missing plugin" width="640">
@@ -405,7 +425,7 @@ flowchart TD
     B -- No --> X[Refuse and explain why<br/>no files are changed]
     B -- Yes --> C{package.json changed<br/>externally?}
     C -- Yes --> X
-    C -- No --> D[Back up package.json]
+    C -- No --> D[Back up config and preflight the entire combination]
     D --> E
     subgraph S [Switch]
         E[Undo enabled recorded layers<br/>in reverse install order] --> F[Switch dsh-purge and<br/>write the new bundle list]
@@ -424,12 +444,14 @@ flowchart TD
 flowchart TD
     S[Choose a source] --> B[Take a pre-install snapshot]
     B --> I[Official installer<br/>or install it yourself in Harness]
-    I --> T[Launch and test the plugin]
-    T --> Q[Fully quit Harness]
-    Q --> D[Scan differences]
-    D --> R{Review}
-    R -- Confirm --> K[Save as a patch record<br/>restorable from now on]
-    R -- Abandon --> N[Keep as is<br/>still unrecorded]
+    I --> T[Open Harness automatically<br/>use the plugin normally]
+    T --> Q[Fully quit Harness and its tray process]
+    Q --> D[Wait for files to settle<br/>compare and verify automatically]
+    D --> R{Checks pass?}
+    R -- Yes --> K[Save restoration record automatically]
+    R -- No --> N[Retain snapshots and report the issue]
+    N --> F[Fix and continue automatic recording]
+    F --> D
 ```
 
 ### Limits of patch restoration
@@ -484,7 +506,7 @@ Hover over the button to see why. Common causes:
 
 - **The executable cannot be found**: follow the red banner at the top of the main window to fix the path.
 - **Harness is running**, even if only its tray icon is left: quit it completely.
-- **An install recording is in progress**: finish or abandon it first.
+- **An install recording is in progress**: quit Harness and wait for automatic saving, or fix the reported exception and continue. A record cannot be discarded once changes exist.
 - **A switch is in progress**: wait for it to finish.
 
 </details>
@@ -506,7 +528,7 @@ No. Disabling removes it from the bundle list and undoes its recorded patch. The
 <details>
 <summary><b>A plugin is already installed but shows "no pre-install record". What can I do?</b></summary>
 
-The launcher cannot recover changes that already happened, so it cannot guarantee restoring that plugin. You can still enable and disable it as usual; disabling just does not restore the files it wrote. In future, install new plugins through manual add or plugin discovery so they are recorded automatically.
+Unknown past changes cannot be recovered, so file-combination switching is blocked. Restore the original state using the author's uninstall/restore procedure, a reliable original backup, or a clean installation, then reinstall through manual add or discovery with automatic recording. The modified current state cannot be registered as the original.
 
 </details>
 
@@ -534,14 +556,14 @@ See [Leaderboards → Methodology and limits](#leaderboards). In short, most of 
 <details>
 <summary><b>Is installing community plugins safe?</b></summary>
 
-Installation runs the plugin's own code. The launcher checks the package structure, records file changes and asks you to review the list, but it is **neither a security review nor a sandbox**. Only install plugins you trust, and read their source code and documentation first.
+Installation runs the plugin's own code. The launcher checks package structure, records changes and verifies restoration data, but it is **neither a security review nor a sandbox**. Only install plugins you trust, and read their source code and documentation first.
 
 </details>
 
 <details>
 <summary><b>Does the background service keep running after I close the window?</b></summary>
 
-It exits about 5 minutes after all windows are closed, or after any running snapshot or install job finishes. Double-clicking `launch.vbs` while it is still running simply reuses it.
+Installation and first-run recording continue after the menu closes. The service exits only when recording has finished and the menu has been idle for about five minutes; it may exit soon after completion if that timeout has already elapsed. Exceptions remain on disk for the next visit. Double-clicking `launch.vbs` reuses a service that is still running.
 
 </details>
 
@@ -573,7 +595,10 @@ node --check ui/app.js           # Node.js 22+, syntax check only
 | --- | --- |
 | `launcher.py` | Local HTTP service, configuration reads and writes, switching and rollback, executable detection. |
 | `patch_modes.py` | Built-in dsh-purge adapter and official archive verification. |
-| `plugin_tracking.py` | Generic install recording: snapshots, differences, review, replay and recovery. |
+| `plugin_tracking.py` | Mandatory recording, first-run supervision, verified saving and the current record index. |
+| `version_store.py` | Deduplicated installed code, dependency graphs, immutable revisions and combination records. |
+| `file_view.py`, `switch_plan.py` | Read-only file overlay, whole-switch preflight, unified transactions and crash recovery. |
+| `migrate.py` | Standalone one-time conversion with a pre-migration metadata archive; the runtime uses only the current format. |
 | `catalog.py` | Plugin catalog: npm and GitHub search, details and leaderboards (fixed public endpoints only). |
 | `ui/` | Interface: `index.html`, `style.css`, `app.js`; no build step. |
 | `launch.vbs`, `bootstrap.ps1` | Start without a console window. |

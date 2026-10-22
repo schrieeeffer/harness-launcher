@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 from launcher import (Manager, MenuError, OFFICIAL, Server, Handler, UNINSTALL_KEYS, atomic_write,
-                      default_executable, registry_executable)
+                      default_executable, registry_executable, file_hash)
 
 
 class ManagerTests(unittest.TestCase):
@@ -35,6 +35,21 @@ class ManagerTests(unittest.TestCase):
         self.exe = root / 'DeepSeek Harness.exe'
         self.exe.write_bytes(b'not a real executable')
         self.manager = Manager(root / 'data', self.home, self.exe)
+        # Synthetic, already verified bundle-only records; unknown real plugins
+        # now block every file-combination switch, not only native mode.
+        tracker = self.manager.tracking
+        value = tracker.load()
+        for name in ['plugin-a', '@demo/plugin-b']:
+            value['records'][name] = {'version': '1.2', 'enabled': name == 'plugin-a',
+                                      'delta': tracker.object('deltas', {'changes': []}),
+                                      'count': 0, 'baseSelection': [], 'history': []}
+            record = value['records'][name]
+            record.update(source='fixture', hostHash=file_hash(self.exe), baseVersions={},
+                          baseline=tracker.object('snapshots', {}), after=tracker.object('snapshots', {}), manifestBefore=None)
+            record['package'] = tracker.versions.package_snapshot(name, 'fixture')
+            record['revision'] = tracker.versions.revision(name, record, record['package'], 'fixture')
+            value['order'].append(name)
+        tracker.save(value)
         self.process_patch = patch('launcher.running_harness', return_value=[])
         self.process_patch.start()
         self.addCleanup(self.process_patch.stop)
@@ -103,8 +118,9 @@ class ManagerTests(unittest.TestCase):
         (self.profile / 'node_modules' / 'plugin-a' / 'package.json').unlink()
         with self.assertRaises(MenuError):
             self.manager.apply(['plugin-a'], self.manager.state()['revision'])
-        self.manager.apply([], self.manager.state()['revision'])
-        self.assertEqual(self.manager.state()['enabled'], [])
+        with self.assertRaises(MenuError):
+            self.manager.apply([], self.manager.state()['revision'])
+        self.assertEqual(self.path.read_bytes(), self.raw)
 
     def test_failed_spawn_rolls_back_original_bytes(self):
         with patch('launcher.subprocess.Popen', side_effect=OSError('test launch failure')):

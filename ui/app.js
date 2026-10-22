@@ -3,7 +3,18 @@ const $ = id => document.getElementById(id);
 const token = new URLSearchParams(location.search).get('token') || sessionStorage.getItem('harness-menu-token') || '';
 sessionStorage.setItem('harness-menu-token', token);
 let state = null, selected = new Set(), mode = 'current', activeScheme = '', busy = false, timer, tracking = null, trackingWasWorking = false;
-function ask(message) { return new Promise(resolve => { const dialog = $('confirmDialog'); $('confirmMessage').textContent = message; let accepted = false; $('confirmAccept').onclick = () => { accepted = true; dialog.close(); }; $('confirmCancel').onclick = () => dialog.close(); dialog.addEventListener('close', () => resolve(accepted), {once: true}); dialog.showModal(); $('confirmCancel').focus(); }); }
+function ask(message, {title = '确认操作', accept = '确认', cancel = '取消', danger = false} = {}) {
+  return new Promise(resolve => {
+    const dialog = $('confirmDialog'); let accepted = false;
+    $('confirmTitle').textContent = title; $('confirmMessage').textContent = message;
+    $('confirmAccept').textContent = accept; $('confirmAccept').className = 'button ' + (danger ? 'danger' : 'primary');
+    $('confirmCancel').textContent = cancel;
+    $('confirmAccept').onclick = () => { accepted = true; dialog.close(); };
+    $('confirmCancel').onclick = () => dialog.close();
+    dialog.addEventListener('close', () => resolve(accepted), {once: true});
+    dialog.showModal(); $('confirmCancel').focus();
+  });
+}
 function element(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; }
 function svgIcon(name) { const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg'), use = document.createElementNS(ns, 'use'); svg.setAttribute('class', 'icon'); svg.setAttribute('aria-hidden', 'true'); use.setAttribute('href', '#i-' + name); svg.append(use); return svg; }
 // The backend reports '未知' when package.json has no readable version.
@@ -17,6 +28,7 @@ async function api(path, body) {
 }
 async function act(fn) { if (busy) return; busy = true; updateSummary(); try { await fn(); } catch (error) { toast(error.message, true); } finally { busy = false; updateSummary(); renderTracking(); } }
 function availableIds() { return state.plugins.filter(p => p.available).map(p => p.id); }
+function hasUntracked() { return Boolean(state?.plugins.some(p => p.tracking === 'untracked' && p.id !== tracking?.session?.plugin)); }
 function selection() { return state.plugins.filter(p => selected.has(p.id)).map(p => p.id); }
 function isChanged() { return state && (state.enabled.length !== selected.size || state.enabled.some(x => !selected.has(x))); }
 function needsPatchSwitch() { const p = state?.patchMode; return p?.supported && (p.pending || p.mode !== (selected.has('dsh-purge') ? 'plugin' : 'native')); }
@@ -67,7 +79,7 @@ function renderPlugins() {
     const icon = element('div', 'plugin-icon tone-' + tone(p.id), p.id === 'dsh-purge' ? 'P' : p.id.split('/').pop().replace(/^dsh-/, '').slice(0, 1).toUpperCase());
     const info = element('div', 'plugin-info'); const heading = element('div', 'plugin-heading');
     heading.append(element('strong', '', p.id), element('span', 'badge version', versionLabel(p.version)));
-    heading.append(element('span', 'badge' + (p.tracking !== 'untracked' ? ' on' : ' warn'), p.tracking === 'auto' ? '已自动记录补丁' : p.id === 'dsh-purge' ? '支持自动还原补丁' : '未记录安装前状态'));
+    heading.append(element('span', 'badge' + (p.tracking !== 'untracked' ? ' on' : ' warn'), p.id === tracking?.session?.plugin ? '安装记录进行中' : p.tracking === 'auto' ? '已自动记录补丁' : p.id === 'dsh-purge' ? '支持自动还原补丁' : '未记录安装前状态'));
     if (!p.available) heading.append(element('span', 'badge error', '文件缺失'));
     else if (state.enabled.includes(p.id)) heading.append(element('span', 'badge success', '当前已启用'));
     const description = element('p', 'plugin-description', p.description); description.title = p.description;
@@ -89,55 +101,65 @@ function updateSummary() {
   $('selectionDescription').textContent = selected.size ? '启用插件时自动恢复已校验的补丁快照。' : '应用或启动时还原已适配补丁，保留账号与会话。';
   $('selectionList').replaceChildren(...(selected.size ? selection().map(id => element('li', '', id)) : [element('li', 'none', '仅加载官方基础组件')]));
   const patch = state.patchMode || {};
+  const unknown = patch.unknown?.filter(name => name !== tracking?.session?.plugin) || [];
   $('patchTitle').textContent = patch.error ? '补丁切换需要处理' : patch.verifiedNative && !selected.size ? '已切换原生模式 · 启动前再次核验' : !selected.size ? '将还原补丁并切换官方文件' : '补丁与插件开关自动同步';
-  $('patchDescription').textContent = patch.error || (patch.unknown?.length ? '以下插件缺少安装前记录，不能保证还原：' + patch.unknown.join('、') : !selected.size ? '按逆序还原已记录文件，再切换官方归档；重新启用时按安装顺序恢复。' : '内置适配与自动记录统一切换；版本变化、记录外改动、共享文件冲突时停止覆盖。');
+  $('patchDescription').textContent = patch.error || (unknown.length ? '以下插件缺少安装前记录，已暂停组合切换：' + unknown.join('、') + '。需先恢复干净的安装，再通过启动器自动记录。' : !selected.size ? '按逆序还原已记录文件，再切换官方归档；重新启用时按安装顺序恢复。' : '内置适配与自动记录统一切换；版本变化、记录外改动、共享文件冲突时停止覆盖。');
   $('runtime').className = 'status' + (state.running ? ' running' : ''); $('runtime').replaceChildren(element('i'), document.createTextNode(state.running ? 'Harness 运行中' : 'Harness 未运行'));
   const missing = !state.executableExists;
   $('exeWarning').hidden = !missing; $('useDetected').hidden = !state.detectedExecutable;
   $('exeWarningText').textContent = '当前设置的路径不存在：' + state.executable + (state.detectedExecutable ? '。已在系统中检测到 ' + state.detectedExecutable + '，确认无误后可直接使用。' : '。请在设置中选择 DeepSeek Harness.exe。') + ' 修正前不能启动、切换补丁或开始安装记录。';
   $('draftStatus').className = 'draft-status' + (isChanged() || needsPatchSwitch() ? ' changed' : '');
-  $('draftStatus').textContent = busy ? '正在校验与切换补丁…' : missing ? '未找到 Harness 程序 · 请先修正应用路径' : state.running ? '切换前请完全退出 Harness' : isChanged() || needsPatchSwitch() ? '待应用 · 同步插件与补丁' : '与当前配置一致';
-  $('draftStatus').title = $('draftStatus').textContent;
   const recording = Boolean(tracking?.session || tracking?.busy);
-  $('launch').disabled = busy || recording || state.running || missing;
-  $('launch').title = state.running ? '请先退出 Harness（包括托盘）' : missing ? '请在设置中确认应用路径' : '备份配置并启动 Harness';
-  $('apply').disabled = busy || recording || state.running || missing || !(isChanged() || needsPatchSwitch());
+  $('draftStatus').textContent = busy ? '正在校验与切换补丁…' : missing ? '未找到 Harness 程序 · 请先修正应用路径' : recording ? tracking?.session?.error ? '安装记录需要处理' : '安装记录自动完成中' : state.running ? '切换前请完全退出 Harness' : hasUntracked() ? '存在未记录插件 · 组合切换已暂停' : isChanged() || needsPatchSwitch() ? '待应用 · 同步插件与补丁' : '与当前配置一致';
+  $('draftStatus').title = $('draftStatus').textContent;
+  $('launch').disabled = busy || recording || state.running || missing || hasUntracked();
+  $('launch').title = recording ? '安装记录完成后才能切换组合或重新启动' : state.running ? '请先退出 Harness（包括托盘）' : missing ? '请在设置中确认应用路径' : hasUntracked() ? '已有插件缺少安装前记录，组合切换已暂停' : '备份配置并启动 Harness';
+  $('apply').disabled = busy || recording || state.running || missing || hasUntracked() || !(isChanged() || needsPatchSwitch());
   $('apply').textContent = selected.size ? '应用选择' : '还原为原生';
   $('saveScheme').disabled = busy; $('refresh').disabled = busy;
-  document.querySelectorAll('[data-restore]').forEach(button => button.disabled = state.running || busy || recording || missing);
+  document.querySelectorAll('[data-restore]').forEach(button => button.disabled = state.running || busy || recording || missing || hasUntracked());
 }
 
 function renderTracking() {
   if (!tracking) return;
   const session = tracking.session;
+  $('trackingCompleted').hidden = Boolean(session) || !tracking.completed;
+  $('trackingCompletedTitle').textContent = tracking.completed ? tracking.completed.plugin + ' 的还原记录已自动保存' : '';
   $('trackingForm').hidden = Boolean(session);
   $('trackingActive').hidden = !session;
   $('trackingBanner').hidden = !session; $('recordsSession').hidden = !session; $('addDot').hidden = !session;
-  const step = session ? {preparing: 1, installing: 2, recording: 2, scanning: 3, review: 3}[session.phase] ?? 1 : 0;
+  const step = session ? {preparing: 1, installing: 2, recording: 2, scanning: 3, verifying: 3}[session.phase] ?? 1 : 0;
   [...$('trackingSteps').children].forEach((n, i) => { n.classList.toggle('done', i < step); n.classList.toggle('current', i === step); });
-  $('trackingBegin').disabled = busy || tracking.busy || Boolean(state?.running) || state?.executableExists === false;
-  $('trackingBegin').title = state?.executableExists === false ? '请先在设置中修正 Harness 应用路径' : '';
+  // The plugin currently being installed is expected to be unrecorded until completion.
+  const blockedBaseline = !session && hasUntracked();
+  $('trackingBegin').disabled = busy || tracking.busy || Boolean(state?.running) || state?.executableExists === false || blockedBaseline;
+  $('trackingBegin').title = state?.executableExists === false ? '请先在设置中修正 Harness 应用路径' : blockedBaseline ? '已有插件没有安装前记录，需先恢复干净的安装' : state?.running ? '请先完全退出 Harness（包括托盘）' : '';
   renderRecords();
-  if (!session) return;
-  const names = {preparing: '建立安装前快照', installing: '通过官方安装器安装', recording: '记录安装与首次测试', scanning: '对比文件差异', review: '复核变更归属'};
-  $('trackingStageTitle').textContent = session.plugin + ' · ' + (names[session.phase] || session.phase);
+  if (!session) { $('trackingOtherActions').open = false; return; }
+  const names = {preparing: '自动备份原始文件', installing: '正在安装插件', recording: '首次运行记录中', scanning: '自动整理插件改动', verifying: '自动校验并保存'};
+  $('trackingStageTitle').textContent = session.plugin + ' · ' + (session.error ? '需要处理' : names[session.phase] || session.phase);
   $('trackingBannerTitle').textContent = $('recordsSessionTitle').textContent = $('trackingStageTitle').textContent;
-  const instructions = {preparing: '请等待快照准备完成后再安装插件。首次可能需要复制较多文件。', installing: '正在调用官方插件安装命令，快照与安装日志会保留在本机。', recording: '现在只安装 / 测试此插件。可以启动测试并应用插件自身的设置，完全退出 Harness 后再扫描差异。', scanning: '正在比较快照；未变化的文件会复用已有内容。', review: '以下是记录窗口内的全部差异，并不等于已证明由插件进程独自写入。确认期间只操作了此插件、清单归属正确后保存。'};
-  $('trackingInstruction').textContent = instructions[session.phase] || '';
-  $('trackingBannerText').textContent = instructions[session.phase] || '';
-  $('trackingCounter').textContent = session.phase === 'review' ? session.count + ' 处变更' : tracking.progress.count + ' 个文件 · ' + Math.round(tracking.progress.bytes / 1024 / 1024) + ' MB';
+  $('openTrackingProgress').textContent = $('recordsContinue').textContent = session.error ? '处理问题' : '查看进度';
+  const instructions = {preparing: '正在自动备份安装前的文件，完成后继续安装。首次备份可能较慢，请暂时保持 Harness 关闭。', installing: '正在通过 Harness 官方安装器安装，完成后自动打开 Harness。', recording: session.source ? '原始文件已备份，Harness 会自动打开。正常使用插件即可；完全退出 Harness（包括托盘）后，后台自动校验并保存还原记录。' : '原始文件已备份，Harness 会自动打开。请在里面安装或升级这个插件，正常使用并完全退出后，后台自动校验保存。', scanning: '正在自动对比安装前后的文件，不需要手动扫描或保存。', verifying: '正在检查文件是否稳定、版本和组合是否一致，并校验还原所需的文件副本；通过后自动保存。'};
+  const instruction = session.error ? (session.baseline ? '原始快照和当前文件都会保留。' : '原始文件尚未备份完整，安装已暂停。') + '请处理下方的问题，再继续自动记录；异常解决前不会切换插件组合或覆盖文件。' : instructions[session.phase] || '';
+  $('trackingInstruction').textContent = $('trackingBannerText').textContent = instruction;
+  $('trackingCounter').textContent = session.phase === 'verifying' && session.count !== undefined ? '检测到 ' + session.count + ' 项改动' : (session.phase === 'scanning' ? '已检查 ' : session.phase === 'preparing' ? '已备份 ' : '安装前备份：') + tracking.progress.count + ' 个文件 · ' + Math.round(tracking.progress.bytes / 1024 / 1024) + ' MB';
   $('trackingPath').textContent = tracking.busy ? tracking.progress.path : '';
   $('trackingError').hidden = !session.error; $('trackingError').textContent = session.error || '';
-  const canFinish = session.baseline && !tracking.busy && !state?.running;
-  $('trackingLaunch').disabled = tracking.busy || session.phase !== 'recording' || Boolean(state?.running);
-  $('trackingFinish').disabled = !canFinish;
-  $('trackingAccept').hidden = session.phase !== 'review'; $('trackingAccept').disabled = tracking.busy || Boolean(state?.running);
-  $('trackingExport').hidden = session.phase !== 'review';
-  $('trackingAbandon').disabled = tracking.busy;
-  $('trackingReview').hidden = session.phase !== 'review';
+  const working = busy || tracking.busy;
+  $('trackingTestSteps').hidden = session.phase !== 'recording' || Boolean(session.error);
+  $('trackingTestHelp').textContent = state?.running ? 'Harness 正在运行，无需回到这里点击确认。使用结束后从托盘中退出，安装记录会自动完成。' : session.observedRunning ? '已检测到 Harness 退出，正在等待文件停止写入，随后自动保存。' : '正在等待 Harness 打开。请只安装、使用这一个插件，避免同时编辑其他文件。';
+  $('trackingReviewActions').hidden = !session.error;
+  $('trackingRetry').disabled = working || Boolean(state?.running);
+  $('trackingRetry').title = state?.running ? '请先完全退出 Harness（包括托盘）' : '保留原始快照，重新检查并继续自动记录';
+  $('trackingExport').hidden = !session.error || !session.delta;
+  $('trackingAbandon').disabled = working || Boolean(state?.running);
+  $('trackingOtherActions').hidden = !session.error || Boolean(session.delta) || Boolean(session.installed);
+  $('trackingPauseHint').textContent = session.error ? '可以关闭菜单，备份和异常信息会保留。处理问题后再继续；当前不会自动跳过错误。' : '可以关闭菜单窗口，后台会继续记录。退出 Harness 时请一并退出托盘程序；安装完成前只操作这个插件。';
+  $('trackingReview').hidden = !session.error || !session.delta;
   $('trackingReview').replaceChildren();
-  if (session.phase === 'review') {
-    if (!session.count) $('trackingReview').append(element('p', 'muted', '托管范围没有文件补丁。保存后将作为已记录的加载型插件管理。'));
+  if (session.error && session.delta) {
+    if (!session.count) $('trackingReview').append(element('p', 'muted', '没有在记录范围内发现额外文件改动。保存后仍会记住这个插件的安装情况。'));
     for (const item of tracking.review) {const row = element('div', 'tracking-change'); row.append(element('span', 'badge', item.change), element('code', '', item.path)); $('trackingReview').append(row);}
     if (session.count > tracking.review.length) $('trackingReview').append(element('p', 'small muted', '此处显示前 200 项，完整清单可导出查看。'));
   }
@@ -154,7 +176,7 @@ function renderRecords() {
     return recordRow(name + ' · v' + record.version, [record.count + ' 处差异 · ' + (record.enabled ? '补丁已启用' : '补丁已停用'), ...(record.baseSelection.length ? ['记录时的基础组合：' + record.baseSelection.join('、')] : []), ...(record.historyCount ? ['保留 ' + record.historyCount + ' 份历史记录'] : [])], upgrade);
   }));
   if (!entries.length) $('trackingRecords').append(element('p', 'empty', '还没有通用记录。通过「手动添加」或「发现插件」安装的插件会出现在这里。'));
-  const plugins = state?.plugins || [], builtin = plugins.filter(p => p.tracking === 'builtin'), untracked = plugins.filter(p => p.tracking === 'untracked');
+  const plugins = state?.plugins || [], builtin = plugins.filter(p => p.tracking === 'builtin'), untracked = plugins.filter(p => p.tracking === 'untracked' && p.id !== session?.plugin);
   $('builtinGroup').hidden = !builtin.length; $('untrackedGroup').hidden = !untracked.length; $('untrackedCount').textContent = untracked.length;
   $('builtinRecords').replaceChildren(...builtin.map(p => recordRow(p.id + ' · ' + versionLabel(p.version), ['关闭时使用保留的官方归档并暂存注入文件，启用时恢复同版本补丁快照；版本升级后需要重新校验。'])));
   $('untrackedRecords').replaceChildren(...untracked.map(p => recordRow(p.id + ' · ' + versionLabel(p.version), [(state.enabled.includes(p.id) ? '当前已启用 · ' : '') + (p.available ? '本机已安装，没有安装前快照' : p.error)])));
@@ -165,10 +187,10 @@ const sourceKinds = {
   npm: {label: '版本或标签（可选）', placeholder: '例如：1.2.0 或 latest；留空安装最新版', hint: '快照完成后调用 Harness 官方安装器，从包管理器当前配置的 registry 安装。'},
   local: {label: '本地目录', placeholder: '例如：D:\\plugins\\dsh-example', hint: '快照完成后由官方安装器从该目录安装，目录内需要有 package.json。'},
   git: {label: '仓库地址', placeholder: '例如：git+https://github.com/作者/仓库.git#v1.0.0', hint: '仓库地址不锁定 commit，建议在 # 后填写固定的 tag 或 commit。'},
-  self: {hint: '快照完成后，请在 Harness 内自行安装或升级此插件；测试并完全退出后，回到这里扫描差异。'}
+  self: {hint: '先自动备份并打开 Harness。请在里面安装或升级这个插件，正常使用并完全退出后自动保存还原记录。'}
 };
 function sourceKind() { return document.querySelector('[name=sourceKind]:checked').value; }
-function renderSourceKind() { const kind = sourceKind(), info = sourceKinds[kind]; $('sourceField').hidden = kind === 'self'; $('sourceLabel').textContent = info.label || ''; $('trackingSource').placeholder = info.placeholder || ''; $('trackingSource').required = kind === 'local' || kind === 'git'; $('sourceHint').textContent = info.hint; }
+function renderSourceKind() { const kind = sourceKind(), info = sourceKinds[kind]; $('sourceField').hidden = kind === 'self'; $('sourceLabel').textContent = info.label || ''; $('trackingSource').placeholder = info.placeholder || ''; $('trackingSource').required = kind === 'local' || kind === 'git'; $('sourceHint').textContent = info.hint; $('trackingBegin').textContent = kind === 'self' ? '备份并打开 Harness' : '安装并打开 Harness'; }
 function setSource(kind, value = '') { document.querySelector('[name=sourceKind][value="' + kind + '"]').checked = true; $('trackingSource').value = value; renderSourceKind(); }
 function composedSource() { const kind = sourceKind(), name = $('trackingName').value.trim(), value = $('trackingSource').value.trim(); return kind === 'self' ? '' : kind !== 'npm' ? value : !value ? name : value.startsWith(name + '@') ? value : name + '@' + value.replace(/^@/, ''); }
 function openAdd(name = '', source = '', upgrade = false) {
@@ -189,14 +211,14 @@ async function trackingAction(action, body = {}) {
   await act(async () => {const result = await api('tracking/' + action, body); tracking = await api('tracking'); if (state) state.tracking = tracking; renderTracking(); updateSummary(); toast(result.message); if (!tracking.busy && !tracking.session) await refresh(true);});
 }
 function openScheme() { if (!state) return; $('schemeName').value = ''; $('schemePreview').textContent = selected.size ? '包含：' + selection().join('、') : '此方案不加载额外插件。'; $('schemeError').hidden = true; $('schemeDialog').showModal(); $('schemeName').focus(); }
-async function apply(launch) { await act(async () => { const result = await api(launch ? 'launch' : 'apply', {selection: selection(), revision: state.revision, native: selected.size === 0}); await refresh(true); toast(result.message + (result.patchMode === 'native' ? ' · 已还原补丁' : result.patchMode === 'plugin' ? ' · 补丁快照已恢复' : '')); if (launch) { state.running = true; updateSummary(); } }); }
+async function apply(launch) { await act(async () => { const result = await api(launch ? 'launch' : 'apply', {selection: selection(), revision: state.revision, native: selected.size === 0, scheme: mode === 'scheme' ? activeScheme : null}); await refresh(true); toast(result.message + (result.patchMode === 'native' ? ' · 已还原补丁' : result.patchMode === 'plugin' ? ' · 补丁快照已恢复' : '')); if (launch) { state.running = true; updateSummary(); } }); }
 function renderBackups() {
   $('backupList').replaceChildren();
   if (!state.backups.length) $('backupList').append(element('div', 'empty', '暂无备份。首次修改配置前会自动创建。'));
   for (const b of state.backups) {
     const row = element('div', 'backup'), info = element('div');
     info.append(element('strong', '', new Date(b.time).toLocaleString('zh-CN', {hour12: false})), element('p', '', b.reason + ' · ' + (b.plugins.length ? b.plugins.join('、') : '不加载额外插件')));
-    const restore = element('button', 'button', '恢复'); restore.dataset.restore = 'true'; restore.disabled = state.running || busy;
+    const restore = element('button', 'button', '恢复'); restore.dataset.restore = 'true'; restore.disabled = state.running || busy || Boolean(tracking?.session) || hasUntracked();
     restore.onclick = async () => { if (await ask('恢复此备份的 package.json？恢复前会自动备份当前配置。')) act(async () => { const result = await api('restore', {id: b.id, revision: state.revision}); await refresh(true); renderBackups(); toast(result.message); }); };
     row.append(info, restore); $('backupList').append(row);
   }
@@ -214,10 +236,14 @@ $('addButton').onclick = () => openAdd(); $('openTrackingProgress').onclick = ()
 $('recordsButton').onclick = openRecords; $('addToRecords').onclick = openRecords;
 document.querySelectorAll('[name=sourceKind]').forEach(input => input.onchange = renderSourceKind); renderSourceKind();
 $('trackingForm').onsubmit = async event => {event.preventDefault(); await trackingAction('begin', {name: $('trackingName').value.trim(), source: composedSource()});};
-$('trackingLaunch').onclick = () => trackingAction('launch');
-$('trackingFinish').onclick = () => trackingAction('finish');
-$('trackingAccept').onclick = () => trackingAction('accept');
-$('trackingAbandon').onclick = async () => {if (await ask('放弃记录并保留当前文件和安装结果？此操作不会还原安装期间的改动。')) await trackingAction('abandon');};
+$('trackingRetry').onclick = () => trackingAction('retry');
+$('trackingAbandon').onclick = async () => {
+  if ($('trackingAbandon').disabled || !tracking?.session) return;
+  const id = tracking.session.id;
+  if (!await ask('将检查插件是否尚未安装、文件是否没有改动。只有检查通过才取消；如果已经发生改动，会保留记录并要求先处理问题。\n\n只是暂时离开的话，关闭菜单窗口即可，后台会继续记录。', {title: '取消尚未改动的安装？', accept: '检查并取消', cancel: '保留安装记录', danger: true})) return;
+  if (!tracking?.session || tracking.session.id !== id || $('trackingAbandon').disabled) { toast('当前任务已变化，请检查后重试。', true); return; }
+  await trackingAction('abandon');
+};
 $('trackingExport').onclick = () => act(async () => {const data = await api('tracking/diff'); const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'}); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'Harness-文件变更清单.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);});
 
 let catalogSource = 'all', catalogPage = 0, catalogLoading = false, catalogRequest = 0, detailRequest = 0, catalogAbort = null, detailAbort = null, currentDetail = null;
@@ -322,7 +348,7 @@ async function openPluginDetail(item) {
     const existing = state?.plugins.find(p => p.id === data.name);
     const blocked = existing && existing.tracking !== 'auto';
     if (blocked) $('detailContent').append(element('p', 'inline-error', existing.tracking === 'builtin' ? '此插件由内置适配管理，升级前需要重新校验补丁。' : '本机已安装，但没有安装前记录；不能直接补回历史改动。'));
-    if (tracking?.session) $('detailContent').append(element('p', 'inline-error', '已有安装记录任务，请先完成或放弃当前任务。'));
+    if (tracking?.session) $('detailContent').append(element('p', 'inline-error', '已有安装任务，请等待自动保存；如果有异常，请先处理当前任务。'));
     if (data.warning) $('detailContent').append(element('p', 'inline-error', data.warning));
     $('detailContent').append(element('p', 'small muted', '选用后会填入安装表单，由你检查并开始快照。安装会运行插件代码；包结构检查不代表安全审核或兼容性保证。npm 数据源选项仅影响目录搜索，安装沿用 Harness 包管理器配置。'));
     $('detailAdd').disabled = !data.installable || data.stale || Boolean(blocked || tracking?.session);
@@ -340,7 +366,7 @@ document.querySelectorAll('[data-catalog-view]').forEach(button => button.onclic
 document.querySelectorAll('[data-board]').forEach(button => button.onclick = () => { board = button.dataset.board; pressed('[data-board]', button); loadBoard(); });
 $('boardRetry').onclick = loadBoard;
 $('pluginDetailDialog').addEventListener('close', () => {if ($('pluginDetailDialog').open) return; detailRequest++; detailAbort?.abort();});
-$('detailAdd').onclick = () => {if (!currentDetail || $('detailAdd').disabled) return; const chosen = currentDetail; openAdd(chosen.name, chosen.source, state?.plugins.find(p => p.id === chosen.name)?.tracking === 'auto'); toast('已填入插件和来源。检查后点击「建立快照并开始」。');};
+$('detailAdd').onclick = () => {if (!currentDetail || $('detailAdd').disabled) return; const chosen = currentDetail; openAdd(chosen.name, chosen.source, state?.plugins.find(p => p.id === chosen.name)?.tracking === 'auto'); toast('已填入插件和来源。检查后点击「安装并打开 Harness」，还原记录会自动保存。');};
 async function openSettings() {let paths = state; if (!paths) {try {paths = await api('settings');} catch (_) {paths = {};}} $('exePath').value = paths?.executable || ''; $('homePath').value = paths?.home || ''; $('settingsError').hidden = true; $('settingsDialog').showModal(); }
 $('settingsButton').onclick = openSettings; $('exeSettings').onclick = openSettings;
 $('detectExe').onclick = async () => {try {const found = (await api('settings')).detected; if (found) {$('exePath').value = found; toast('已检测到 Harness：' + found + '。确认后点击「保存路径设置」。');} else toast('没有在安装登记和常见目录中找到 Harness，请手动填写 DeepSeek Harness.exe 的完整路径。', true);} catch (error) {toast(error.message, true);}};
@@ -394,5 +420,5 @@ $('importConfirm').onclick = () => act(async () => {
   try { const result = await api('import', {schemes: Object.fromEntries(ok.map(r => [r.name, r.ids]))}); $('importDialog').close(); await refresh(); toast(result.message + (skipped ? ' · 跳过 ' + skipped + ' 个' : '')); }
   catch (error) { $('importError').textContent = error.message; $('importError').hidden = false; }
 });
-setInterval(async () => {try {const data = await api('ping'); tracking = await api('tracking'); if (state) {state.running = data.running; state.tracking = tracking; updateSummary();} renderTracking(); if (trackingWasWorking && !tracking.busy) {await refresh();} trackingWasWorking = tracking.busy;} catch (_) { $('runtime').className = 'status offline'; $('runtime').replaceChildren(element('i'), document.createTextNode('菜单服务已断开')); $('launch').disabled = true; $('apply').disabled = true; }}, 4000);
+setInterval(async () => {try {const previousSession = tracking?.session?.id; const data = await api('ping'); tracking = await api('tracking'); if (state) {state.running = data.running; state.tracking = tracking; updateSummary();} renderTracking(); if (previousSession && !tracking.session) {const completed = tracking.completed; await refresh(true); if (completed) toast(completed.plugin + ' 的还原记录已自动保存，现在可以切换插件组合。');} else if (trackingWasWorking && !tracking.busy) {await refresh();} trackingWasWorking = tracking.busy;} catch (_) { $('runtime').className = 'status offline'; $('runtime').replaceChildren(element('i'), document.createTextNode('菜单服务已断开')); $('launch').disabled = true; $('apply').disabled = true; }}, 4000);
 refresh(true).catch(error => { $('plugins').replaceChildren(element('div', 'empty', '无法读取配置，请打开「设置与说明」检查路径。')); $('inlineError').textContent = error.message; $('inlineError').hidden = false; $('draftStatus').textContent = '配置读取失败'; $('launch').disabled = true; $('apply').disabled = true; toast(error.message, true); });

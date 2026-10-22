@@ -102,7 +102,7 @@
       <section id="trackingBanner" class="notice tracking-banner" hidden>
         <svg class="icon notice-icon" aria-hidden="true"><use href="#i-refresh"/></svg>
         <div><strong id="trackingBannerTitle"></strong><p id="trackingBannerText"></p></div>
-        <button id="openTrackingProgress" class="button">继续</button>
+        <button id="openTrackingProgress" class="button">查看进度</button>
       </section>
 
       <div class="workspace">
@@ -260,7 +260,7 @@
 
   <dialog id="confirmDialog">
     <div class="dialog-head">
-      <h2>确认操作</h2>
+      <h2 id="confirmTitle">确认操作</h2>
       <button class="close" data-close="confirmDialog" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="dialog-body"><p id="confirmMessage" class="confirm-message"></p></div>
@@ -272,17 +272,21 @@
 
   <dialog id="addDialog" class="wide-dialog">
     <div class="dialog-head">
-      <div><h2 id="addTitle">手动添加插件</h2><p class="dialog-desc">安装前自动建立快照，安装和首次测试后复核文件变更。保存后，这个插件就能随时关闭还原、启用恢复。</p></div>
+      <div><h2 id="addTitle">手动添加插件</h2><p class="dialog-desc">先退出 Harness，再开始安装。启动器会自动备份、安装并打开 Harness；正常使用并完全退出后，自动保存还原记录。只有遇到异常才需要回来处理。</p></div>
       <button class="close" data-close="addDialog" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="dialog-body">
       <ol id="trackingSteps" class="stepper" aria-label="安装进度">
         <li><span>1</span>选择来源</li>
         <li><span>2</span>建立快照</li>
-        <li><span>3</span>安装与测试</li>
-        <li><span>4</span>复核变更</li>
+        <li><span>3</span>安装与首次运行</li>
+        <li><span>4</span>自动校验并保存</li>
       </ol>
 
+      <section id="trackingCompleted" class="notice tracking-banner" hidden>
+        <div><strong id="trackingCompletedTitle"></strong><p>可以返回插件列表切换组合，或在下方继续添加其他插件。</p></div>
+        <button class="button" data-close="addDialog">完成</button>
+      </section>
       <form id="trackingForm">
         <div class="manual-hint"><span>不确定包名？可以先在插件目录中搜索。</span><button id="discoverFromTracking" class="button subtle" type="button">去发现插件 →</button></div>
         <fieldset class="source-kinds">
@@ -295,7 +299,7 @@
         <label class="field">插件包名<input id="trackingName" required maxlength="160" placeholder="例如：dsh-example 或 @作者/插件"></label>
         <label class="field" id="sourceField"><span id="sourceLabel">版本或标签（可选）</span><input id="trackingSource" maxlength="2048"></label>
         <p id="sourceHint" class="small muted"></p>
-        <div class="section-actions"><button id="trackingBegin" class="button primary" type="submit">建立快照并开始</button></div>
+        <div class="section-actions"><button id="trackingBegin" class="button primary" type="submit">安装并打开 Harness</button></div>
       </form>
 
       <section id="trackingActive" class="tracking-active" hidden>
@@ -303,17 +307,28 @@
         <p id="trackingInstruction" class="muted"></p>
         <p id="trackingPath" class="small muted tracking-path"></p>
         <p id="trackingError" class="inline-error" hidden></p>
-        <div class="help-tools">
-          <button id="trackingLaunch" class="button">启动并测试插件</button>
-          <button id="trackingFinish" class="button primary">已退出，扫描差异</button>
-          <button id="trackingAccept" class="button primary" hidden>确认归属并保存记录</button>
-          <button id="trackingExport" class="button" hidden>导出完整变更清单</button>
-          <button id="trackingAbandon" class="button">放弃记录，保留现状</button>
+        <div id="trackingTestSteps" class="tracking-test-steps" hidden>
+          <h3>在 Harness 中正常使用即可</h3>
+          <p id="trackingTestHelp" class="small muted"></p>
+          <button id="trackingLaunch" hidden>打开 Harness</button>
+          <button id="trackingFinish" hidden>整理改动</button>
         </div>
         <div id="trackingReview" class="tracking-review" hidden></div>
+        <div id="trackingReviewActions" class="help-tools" hidden>
+          <button id="trackingRetry" class="button primary">继续自动记录</button>
+          <button id="trackingAccept" hidden>保存记录</button>
+          <button id="trackingRescan" hidden>重新整理改动</button>
+          <button id="trackingExport" class="button" hidden>导出完整改动清单</button>
+        </div>
+        <p id="trackingPauseHint" class="small muted tracking-pause-hint">可以关闭菜单窗口，后台会继续记录。退出 Harness 时请一并退出托盘程序；安装完成前只操作这个插件。</p>
+        <details id="trackingOtherActions" class="tracking-other-actions">
+          <summary>取消尚未开始的安装</summary>
+          <p class="small muted">只有插件尚未安装且文件没有改动时才能取消。有改动时会保留记录，避免失去还原依据。</p>
+          <button id="trackingAbandon" class="button danger">检查并取消未改动的安装</button>
+        </details>
       </section>
 
-      <p class="small muted add-foot">期间只安装、测试这一个插件。安装会运行插件代码；已记录插件的历史与升级入口在<button id="addToRecords" class="link-button" type="button">补丁记录</button>。</p>
+      <p class="small muted add-foot">安装会运行插件代码。还原记录始终开启；记录完成前不能切换插件组合。历史与升级入口在<button id="addToRecords" class="link-button" type="button">补丁记录</button>。</p>
     </div>
   </dialog>
 
@@ -325,13 +340,13 @@
     <div class="dialog-body">
       <section id="recordsSession" class="notice tracking-banner" hidden>
         <svg class="icon notice-icon" aria-hidden="true"><use href="#i-refresh"/></svg>
-        <div><strong id="recordsSessionTitle"></strong><p>复核并保存后，会出现在「已记录」中。</p></div>
-        <button id="recordsContinue" class="button">继续</button>
+        <div><strong id="recordsSessionTitle"></strong><p>正常使用并退出 Harness 后自动校验保存；遇到异常时会保留原始快照。</p></div>
+        <button id="recordsContinue" class="button">查看进度</button>
       </section>
 
       <section class="record-group">
         <h3>已记录 <span id="recordedCount" class="count">0</span></h3>
-        <p class="small muted">按文件差异自动关闭 / 恢复。升级时先撤销旧版补丁，新记录确认后才替换，并保留历史。</p>
+        <p class="small muted">关闭 / 启用时自动还原文件。升级时先撤销旧版补丁，新记录校验通过后才替换，并保留历史。</p>
         <div id="trackingRecords" class="record-list"></div>
       </section>
 
@@ -343,16 +358,16 @@
 
       <section id="untrackedGroup" class="record-group" hidden>
         <h3>未记录 <span id="untrackedCount" class="count warn">0</span></h3>
-        <p class="small muted">这些插件安装时没有建立快照，无法得知改过哪些文件。关闭时只停止加载，不能保证还原已写入的文件。</p>
+        <p class="small muted">这些插件安装时没有建立快照，无法得知改过哪些文件。组合切换已暂停；需先恢复干净的安装，再通过启动器安装并自动记录，不能把现状冒充原始文件。</p>
         <div id="untrackedRecords" class="record-list"></div>
       </section>
 
       <details class="help">
         <summary>记录范围与限制</summary>
-        <p>记录窗口内的全部差异会计入该插件。期间只安装、升级和测试这一个插件，不进行其他文件编辑；差异清单需要你复核归属。</p>
+        <p>安装和首次运行期间只操作这个插件，不进行其他文件编辑。启动器会检测其他插件、组合和程序版本是否变化，校验文件与双向还原数据后自动保存；有异常时保留记录并暂停。</p>
         <ul id="trackingScopes" class="scope-list"></ul>
         <p>默认排除账号凭据文件、会话目录和 profile 插件依赖目录，不监控注册表、系统服务及其他磁盘路径。链接新增或类型互换会停止自动登记。发生共享文件冲突时停止覆盖，不强行合并。</p>
-        <p>首次快照需复制托管文件，文件多时可能耗时较长；后续会复用未变化的内容。后续运行或更新若产生记录外变化，会停止自动还原，不能据此宣称整台电脑恢复原样。</p>
+        <p>完整哈希校验可能较慢，文件副本按内容去重。后续运行或更新若产生记录外变化，会停止自动还原，不能据此宣称整台电脑恢复原样。</p>
       </details>
     </div>
     <div class="dialog-actions">

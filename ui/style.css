@@ -127,6 +127,8 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .button.subtle { background: transparent; border-color: transparent; box-shadow: none; color: var(--text-2); }
 .button.subtle:hover:not(:disabled) { background: var(--surface-3); border-color: transparent; }
+.button.danger { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+.button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 a.button.subtle { color: var(--accent-text); }
 
 .icon-btn {
@@ -611,6 +613,7 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
   bottom: 0;
   z-index: 2;
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 14px 24px;
@@ -618,7 +621,7 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
   background: var(--surface-2);
 }
 .section-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
-.confirm-message { color: var(--text-2); line-height: 1.8; overflow-wrap: anywhere; }
+.confirm-message { color: var(--text-2); line-height: 1.8; overflow-wrap: anywhere; white-space: pre-line; }
 
 .settings-section + .settings-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
 .settings-section h3 { margin-bottom: 14px; }
@@ -686,6 +689,7 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 .source-kind:has(input:checked) strong { color: var(--accent-text); }
 .source-kind:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 #sourceHint { margin-top: -6px; }
+#trackingCompleted { margin: 0 0 20px; }
 .add-foot { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
 
 .record-group + .record-group, #recordsSession:not([hidden]) + .record-group { margin-top: 24px; }
@@ -696,9 +700,16 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 #recordsSession { margin-bottom: 0; }
 
 .tracking-active { padding: 16px; border: 1px solid var(--accent-border); border-radius: var(--radius); background: #fafbff; }
-.tracking-stage { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.tracking-stage { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .tracking-stage strong { font-size: 14px; overflow-wrap: anywhere; }
+.tracking-stage .badge { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .tracking-path { font-family: var(--font-mono); line-height: 1.6; overflow-wrap: anywhere; }
+.tracking-test-steps { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+.tracking-test-steps h3 { margin-bottom: 6px; }
+.tracking-pause-hint { margin-top: 20px; }
+.tracking-other-actions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tracking-other-actions summary { color: var(--text-3); font-size: 12px; cursor: pointer; }
+.tracking-other-actions p { margin: 12px 0; }
 .tracking-review { max-height: 300px; margin-top: 16px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .tracking-review > p { margin: 10px 12px; }
 .tracking-change { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--surface-3); }
