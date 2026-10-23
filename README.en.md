@@ -12,7 +12,7 @@ Choose which plugins to load on each launch, discover official and community plu
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.2.1%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.3.0%20preview-orange.svg)
 
 [简体中文](README.md) · **English**
 
@@ -25,6 +25,7 @@ Choose which plugins to load on each launch, discover official and community plu
 
 ## Contents
 
+- [Updated feature tour and verification screenshots](docs/feature-tour.en.md)
 - [Why it exists](#why-it-exists)
 - [Features](#features)
 - [Getting started](#getting-started)
@@ -77,20 +78,20 @@ Harness Launcher addresses this with a local web interface. You pick plugins bef
 
 ## Getting started
 
-### Upgrading to 0.2.1
+### Upgrading to 0.3.0
 
-0.2.1 uses one current record format and removes old index, switch-journal and manual-confirmation runtime branches. Finish incomplete recordings/recoveries in the previous version, fully quit Harness and the launcher service, then run in the project folder:
+0.3.0 uses format 3 for settings, the plugin registry, adapter state, switch journals and configuration backups. The runtime accepts only this format. To upgrade a complete v2 store, finish pending installations and recovery in the previous version, fully quit Harness and the launcher service, then run in the project folder:
 
 ```powershell
 python migrate.py
 python migrate.py --apply
 ```
 
-The first command prepares and validates; the second replaces metadata. The tool preserves installed plugin versions, enabled choices and live application files, and archives original indexes, settings and configuration backups under `migrations/` in the launcher data directory. Missing historical artifacts are never fabricated. Old configuration backups bind the versions installed at migration time; they are not historical-version downgrades. Incomplete work, unknown file changes or missing original snapshots stop conversion.
+The first command validates a separate stage and removes that temporary directory on exit. The second rebuilds and verifies objects, blobs and combinations before swapping directories. Installed versions, enabled choices and live Harness files are preserved. The complete old store becomes a sibling `<data>.archive-<timestamp>-<id>` with a checksum manifest, solely for offline recovery. The new runtime does not read that archive. Missing or damaged history, pending work and unknown file changes stop conversion.
 
-The new default is `%USERPROFILE%\.harness-launcher`, avoiding Windows Store AppData virtualization that can expose different records at the same logical path. Initial migration automatically imports the old `%LOCALAPPDATA%\HarnessLauncher` store and retains its source. After an interrupted import, rerun `python migrate.py --apply`. For a custom source, use `python migrate.py --source <old folder> --data <new empty folder> --apply`. Only the current format is used at runtime; the old folder is an archive.
+The default remains `%USERPROFILE%\.harness-launcher`. For a custom store use `python migrate.py --data <directory> --apply`; the tool no longer searches or merges old AppData automatically. If directory cutover is interrupted and a sibling `.upgrade.json` remains, run `python migrate.py --recover` first, adding `--data` for a custom store. Earlier formats or interrupted earlier imports must be handled with their matching previous version first.
 
-Fresh installations without old data need no migration. Updating the launcher does not automatically update plugin packages or require maintaining two launcher versions.
+Fresh installations need no migration. Future extensions should use optional fields and explicit capability requirements; necessary semantic changes may still require offline conversion. No project can promise that migration will never be needed again. See the [architecture and evolution contract](docs/architecture.md).
 
 ### Requirements
 
@@ -120,7 +121,7 @@ No pip or npm packages are needed.
 3. After that, double-click **`launch.vbs`** to start without a console window. It prefers the `pythonw.exe` bundled with Harness (found from the saved application path or `DSH_EXECUTABLE`) and falls back to `pythonw.exe` on `PATH`. You can create a desktop shortcut to `launch.vbs`.
 
 > [!TIP]
-> Double-clicking `launch.vbs` reuses the existing service. Installation and first-run recording continue after the menu closes. The roughly five-minute idle timeout resumes after automatic saving; exceptions are retained for the next visit.
+> Double-clicking `launch.vbs` reuses the existing service. The background service continues running and recording after the window closes; suspended browser tabs and computer sleep no longer trigger an automatic exit. To stop it, use **Settings → Exit launcher service** (设置与说明 → 退出启动器后台). Active installation, recording or switching blocks exit; exceptions are retained.
 
 ### First-time setup
 
@@ -155,7 +156,11 @@ The main window has three areas:
 - **Installed plugins** (已安装插件): every plugin bundle recognized in the local desktop profile.
 - **Launch panel** (本次启动): a summary of the plugins this launch will load, pending changes, and the launch and apply buttons.
 
-The status pill in the top-right corner refreshes every 4 seconds. It shows **Harness not running** (Harness 未运行, green), **Harness running** (Harness 运行中, amber; switching is blocked), or **Menu service disconnected** (菜单服务已断开, red; the background service has exited, so double-click `launch.vbs` again).
+The status pill checks about every 4 seconds, and immediately when you return to the page. It shows **Harness not running** (Harness 未运行, green) or **Harness running** (Harness 运行中, amber; switching is blocked). Connection failures show a red notice and a **Reconnect** (重新连接) button. If reconnection fails, double-click the desktop shortcut or `launch.vbs` and use the newly opened menu. After a service restart, old page credentials expire, so use the new window.
+
+Selections remain unapplied while disconnected, and changing them cannot reenable launching. Reconnection reloads actual configuration while preserving this page's draft; it never automatically retries a launch or switch. Configuration and recording read errors show their specific cause rather than claiming the service is disconnected.
+
+<img src="docs/images/connection-recovery.png" alt="Connection warning, reconnect action and disabled launch controls, using synthetic sample data" width="100%">
 
 <table>
   <tr>
@@ -380,7 +385,9 @@ Before every change to `package.json`, the launcher saves a backup and notes why
 
 ### Settings
 
-<img src="docs/images/settings.png" alt="Settings: paths, schemes and files, and usage notes" width="640">
+<img src="docs/images/settings.png" alt="Settings: paths, schemes and files, background service, and usage notes" width="640">
+
+**Exit launcher service** disconnects every menu window; an already running Harness keeps running. Active recording or file switching blocks exit; paused exception records stay on disk. To leave temporarily, simply close the window and reopen it later to reuse the service.
 
 - **Paths** (路径): the Harness executable and data directory. **Auto-detect** (自动检测) reads the location registered by the installer. Saving checks that the file is named `DeepSeek Harness.exe` and that the data directory contains `profiles\desktop\package.json`. **Changing the data directory clears your schemes**; export them first if you want to keep them.
 - **Schemes and files** (方案与文件): export and import schemes, and open the launcher's program folder.
@@ -476,9 +483,10 @@ For more detail, see [Patch recording and restoration: technical notes](docs/pat
 | `%USERPROFILE%\.harness-launcher\patches\` | Patch snapshots, install records, installer logs and change lists. |
 | `%USERPROFILE%\.harness-launcher\launcher.log` | Warnings and errors; it never contains the access token. |
 | `%USERPROFILE%\.harness-launcher\instance.json` | The local address of the running service, including its access token, used to reuse the service on repeated starts. |
+| `%USERPROFILE%\.harness-launcher\instance.lock` | OS lock held while the service runs to prevent multiple writers for one data directory. The file remains after exit; its presence does not mean the service is running. |
 | `<install folder>\resources\.harness-launcher-*`<br>`<data directory>\.harness-launcher-*` | Stashes of official or plugin files that are currently inactive. |
 
-With `--data <folder>`, the first five entries are stored in that folder instead. Snapshots can contain private material you keep in rules, skills or configuration files, so keep these folders private.
+With `--data <folder>`, the first six entries are stored in that folder instead. Snapshots can contain private material you keep in rules, skills or configuration files, so keep these folders private.
 
 ### Network access
 
@@ -565,7 +573,7 @@ Installation runs the plugin's own code. The launcher checks package structure, 
 <details>
 <summary><b>Does the background service keep running after I close the window?</b></summary>
 
-Installation and first-run recording continue after the menu closes. The service exits only when recording has finished and the menu has been idle for about five minutes; it may exit soon after completion if that timeout has already elapsed. Exceptions remain on disk for the next visit. Double-clicking `launch.vbs` reuses a service that is still running.
+Yes. The background service stays running, and installation and first-run recording continue after the menu closes. Missing browser heartbeats no longer cause an automatic exit, so a suspended browser or sleeping computer does not leave a dead menu. To stop the service, use **Exit launcher service** in Settings; it checks for active installation, recording and switching. Exceptions remain on disk for the next visit. Double-clicking `launch.vbs` reuses a running service.
 
 </details>
 
@@ -579,14 +587,18 @@ Not yet. Install paths, process detection and patch handling are unfinished on t
 ## Uninstalling
 
 1. Open the launcher, choose the state you want to keep (for example native mode, or your usual plugin combination), and click **Apply**.
-2. Delete the launcher folder and any desktop shortcut. **Deleting the launcher does not roll back any Harness files.**
+2. Exit the launcher service from Settings, then delete the launcher folder and any desktop shortcut. **Deleting the launcher does not roll back any Harness files.**
 3. `%USERPROFILE%\.harness-launcher` holds settings, backups and patch snapshots, and `resources\.harness-launcher-*` plus `.harness-launcher-*` in the data directory hold versions that are currently inactive. Once you delete them you can no longer switch back to those versions, so only remove them when you are sure you no longer need them.
 
 ## Development and contributing
 
 ```powershell
 python -m unittest discover -v   # Python 3.12+
-node --check ui/app.js           # Node.js 22+, syntax check only
+node --check ui/api.js
+node --check ui/state.js
+node --check ui/runtime.js
+node --check ui/app.js           # Node.js 22+, syntax check
+node --test test_ui.cjs          # Isolated connection, recovery and button-state tests
 ```
 
 - Tests use temporary profiles, synthetic ASAR archives and mocked remote responses. They **never** install a real plugin or change a real Harness profile.
@@ -595,18 +607,20 @@ node --check ui/app.js           # Node.js 22+, syntax check only
 
 | Path | Purpose |
 | --- | --- |
-| `launcher.py` | Local HTTP service, configuration reads and writes, switching and rollback, executable detection. |
-| `patch_modes.py` | Built-in dsh-purge adapter and official archive verification. |
+| `launcher.py`, `operations.py`, `errors.py` | HTTP/application coordination, bounded operation status, error codes and recovery advice. |
+| `domain.py`, `recording_state.py`, `operation_models.py` | File identities, snapshot metadata, recording state machine and strict transaction command decoding. |
+| `storage.py`, `settings_store.py`, `runtime_context.py` | Atomic content storage, settings contract and immutable installation paths. |
+| `patch_modes.py`, `adapters.py` | Adapter rules, official archive verification and operation planning. |
 | `plugin_tracking.py` | Mandatory recording, first-run supervision, verified saving and the current record index. |
 | `version_store.py` | Deduplicated installed code, dependency graphs, immutable revisions and combination records. |
 | `file_view.py`, `switch_plan.py` | Read-only file overlay, whole-switch preflight, unified transactions and crash recovery. |
-| `migrate.py` | Standalone one-time conversion with a pre-migration metadata archive; the runtime uses only the current format. |
+| `migrate.py` | Offline v2 → v3 conversion, staged verification, directory cutover and complete old-store archival. |
 | `catalog.py` | Plugin catalog: npm and GitHub search, details and leaderboards (fixed public endpoints only). |
-| `ui/` | Interface: `index.html`, `style.css`, `app.js`; no build step. |
+| `ui/` | `api.js` transport, `state.js` state, `runtime.js` effects, `app.js` rendering; no build step. |
 | `launch.vbs`, `bootstrap.ps1` | Start without a console window. |
 | `docs/` | Technical notes and screenshots. |
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing, and report security issues privately as described in [SECURITY.md](SECURITY.md). See [CHANGELOG.md](CHANGELOG.md) for changes between versions.
+See the [maintenance guide](MAINTENANCE.en.md) for taking over the project, backup/restoration and AI handoff. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing, and report security issues privately as described in [SECURITY.md](SECURITY.md). See [CHANGELOG.md](CHANGELOG.md) for changes between versions.
 
 ## License and disclaimer
 

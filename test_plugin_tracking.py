@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from launcher import Manager, MenuError, OFFICIAL, Server, Handler
-from patch_modes import PatchModes, tree_hash
+from patch_modes import PatchError, tree_hash
 from plugin_tracking import TrackingError
 import test_patch_modes as fixtures
 
@@ -103,8 +103,8 @@ class GenericTrackingTests(unittest.TestCase):
         self.accept()
         self.apply(['dsh-purge'])
         self.assertEqual((self.app / 'main.js').stat().st_mtime_ns, before)
-        ctl = PatchModes(self.manager)
-        self.assertEqual(tree_hash(ctl.app), ctl.load()['treeHash'])
+        ctl = self.manager.tracking.core
+        self.assertEqual(tree_hash(ctl.app, content=True), ctl.load()['treeContentHash'])
 
     def test_conflicting_shared_file_selection_rolls_back_entire_combination(self):
         self.begin('plugin-a')
@@ -153,6 +153,104 @@ class GenericTrackingTests(unittest.TestCase):
         self.assertEqual(unknown.read_bytes(), b'new change after recording')
         self.assertEqual(self.manifest.read_bytes(), before)
 
+    def test_unchanged_generated_yaml_can_switch_after_timestamp_only_rewrites(self):
+        root_yaml = self.profile / 'cordis.yml'
+        content = b'plugins:\n  desktop: {}\n'
+        root_yaml.write_bytes(content)
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        tracker = self.manager.tracking
+        for selection in (['dsh-purge', 'plugin-a'], [], ['dsh-purge', 'plugin-a']):
+            with self.subTest(selection=selection):
+                stamp = root_yaml.stat().st_mtime_ns + 2_000_000_000
+                os.utime(root_yaml, ns=(stamp, stamp))
+                registry = tracker.index.read_bytes()
+                tracker.guard(check_files=True)
+                self.assertEqual(tracker.index.read_bytes(), registry, 'guard must stay read-only')
+                self.apply(selection)
+                self.assertEqual(root_yaml.read_bytes(), content)
+                self.assertEqual(root_yaml.stat().st_mtime_ns, stamp)
+
+    def test_recorded_yaml_patch_still_restores_after_timestamp_only_rewrite(self):
+        root_yaml = self.profile / 'cordis.yml'
+        root_yaml.write_bytes(b'original config')
+        self.begin()
+        self.install_fixture('plugin-a')
+        root_yaml.write_bytes(b'plugin config')
+        self.accept()
+        stamp = root_yaml.stat().st_mtime_ns + 2_000_000_000
+        os.utime(root_yaml, ns=(stamp, stamp))
+        self.apply([])
+        self.assertEqual(root_yaml.read_bytes(), b'original config')
+        self.apply(['dsh-purge', 'plugin-a'])
+        self.assertEqual(root_yaml.read_bytes(), b'plugin config')
+
+    def test_changed_yaml_content_is_rejected_even_with_same_size(self):
+        root_yaml = self.profile / 'cordis.yml'
+        root_yaml.write_bytes(b'config: A')
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        for sealed in (False, True):
+            with self.subTest(current_combination=sealed):
+                if sealed:
+                    self.apply(['dsh-purge', 'plugin-a'])
+                stamp = root_yaml.stat().st_mtime_ns
+                root_yaml.write_bytes(b'config: B')
+                os.utime(root_yaml, ns=(stamp + 2_000_000_000, stamp + 2_000_000_000))
+                manifest = self.manifest.read_bytes()
+                with self.assertRaisesRegex(MenuError, 'root_yaml'):
+                    self.apply([])
+                self.assertEqual(root_yaml.read_bytes(), b'config: B')
+                self.assertEqual(self.manifest.read_bytes(), manifest)
+                root_yaml.write_bytes(b'config: A')
+                os.utime(root_yaml, ns=(stamp, stamp))
+
+    def test_missing_content_evidence_does_not_approve_a_timestamp_change(self):
+        root_yaml = self.profile / 'cordis.yml'
+        root_yaml.write_bytes(b'config')
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        tracker = self.manager.tracking
+        value = tracker.load()
+        value['records']['plugin-a']['after'] = tracker.object('snapshots', {})
+        tracker.save(value)
+        stamp = root_yaml.stat().st_mtime_ns + 2_000_000_000
+        os.utime(root_yaml, ns=(stamp, stamp))
+        with self.assertRaisesRegex(TrackingError, 'root_yaml'):
+            tracker.guard(check_files=True)
+
+    def test_next_install_cannot_adopt_changes_with_preserved_size_and_timestamp(self):
+        root_yaml = self.profile / 'cordis.yml'
+        root_yaml.write_bytes(b'config: A')
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        tracker = self.manager.tracking
+        previous = tracker.load()
+        stamp = root_yaml.stat().st_mtime_ns
+        root_yaml.write_bytes(b'config: B')
+        os.utime(root_yaml, ns=(stamp, stamp))
+        self.assertEqual(tracker.metadata(), tracker.read_object(previous['inventory']))
+        self.popen.reset_mock()
+        tracker.begin('plugin-b', 'plugin-b')
+        summary = self.wait_job(allow_error=True)
+        self.assertIn('文件内容发生变化', summary['session']['error'])
+        self.assertIsNone(summary['session']['baseline'])
+        self.assertEqual(tracker.load()['records'], previous['records'])
+        self.popen.assert_not_called()
+        self.assertEqual(root_yaml.read_bytes(), b'config: B')
+        # The original trusted content remains available for a later retry.
+        root_yaml.write_bytes(b'config: A')
+        os.utime(root_yaml, ns=(stamp, stamp))
+        with patch.object(tracker, 'install'), patch.object(tracker, '_launch'):
+            tracker.retry()
+            self.wait_job()
+        baseline = tracker.read_object(tracker.load()['session']['baseline'])
+        self.assertEqual(tracker.blob_bytes(baseline['root_yaml|.']['hash']), b'config: A')
+
     def test_credentials_sessions_dependencies_and_outside_paths_are_not_snapshotted(self):
         (self.home / '.credentials.yaml').write_bytes(b'not to be read')
         (self.home / 'sessions').mkdir()
@@ -178,6 +276,82 @@ class GenericTrackingTests(unittest.TestCase):
         self.install_fixture('plugin-a')
         with self.assertRaises(TrackingError):
             self.manager.tracking.begin('plugin-a')
+
+    def test_scope_parent_junction_blocks_reads_and_replay_targets(self):
+        tracker = self.manager.tracking
+        is_junction = Path.is_junction
+        with patch.object(Path, 'is_junction', lambda path: path == self.home or is_junction(path)):
+            with self.assertRaisesRegex(TrackingError, '链接'):
+                tracker.target('agents|.')
+            with self.assertRaisesRegex(TrackingError, '链接'):
+                tracker.metadata()
+            with self.assertRaisesRegex(TrackingError, '链接'):
+                tracker.snapshot()
+
+    def test_invalid_upgrade_source_does_not_disable_the_current_revision(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        target = self.app / 'main.js'
+        target.write_bytes(b'plugin patch')
+        self.accept()
+        tracker = self.manager.tracking
+        manifest, registry = self.manifest.read_bytes(), tracker.index.read_bytes()
+        with self.assertRaisesRegex(TrackingError, '来源格式无效'):
+            tracker.begin('plugin-a', 'plugin-a\x00@2')
+        self.assertEqual(self.manifest.read_bytes(), manifest)
+        self.assertEqual(tracker.index.read_bytes(), registry)
+        self.assertEqual(target.read_bytes(), b'plugin patch')
+
+    def test_abandon_rejects_configuration_changes_outside_managed_files(self):
+        self.begin()
+        tracker = self.manager.tracking
+        manifest = json.loads(self.manifest.read_bytes())
+        manifest['dependencies']['unrelated'] = '1.0'
+        self.manifest.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(TrackingError, '配置已经改变'):
+            tracker.abandon()
+        self.assertIsNotNone(tracker.load()['session'])
+        self.assertEqual(json.loads(self.manifest.read_bytes()), manifest)
+
+    def test_abandon_unchanged_upgrade_undoes_first_run_enablement(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        self.begin('plugin-a')
+        tracker = self.manager.tracking
+        self.assertIn('plugin-a', self.manager.manifest()[2])
+        self.assertFalse(tracker.load()['records']['plugin-a']['enabled'])
+        tracker.abandon()
+        self.assertIsNone(tracker.load()['session'])
+        self.assertNotIn('plugin-a', self.manager.manifest()[2])
+        self.assertFalse(tracker.load()['records']['plugin-a']['enabled'])
+        self.apply(['dsh-purge', 'plugin-a'])
+        self.assertTrue(tracker.load()['records']['plugin-a']['enabled'])
+
+    def test_abandon_rejects_same_version_package_replacement(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        self.begin('plugin-a')
+        tracker = self.manager.tracking
+        target = self.profile / 'node_modules' / 'plugin-a' / 'index.js'
+        target.write_bytes(b'new code with the same package version')
+        with self.assertRaisesRegex(PatchError, '内容与版本记录不同'):
+            tracker.abandon()
+        self.assertIsNotNone(tracker.load()['session'])
+        self.assertEqual(target.read_bytes(), b'new code with the same package version')
+
+    def test_abandon_does_not_require_unrelated_disabled_packages_to_match(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        self.accept()
+        self.apply(['dsh-purge'])
+        target = self.profile / 'node_modules' / 'plugin-a' / 'index.js'
+        target.write_bytes(b'preexisting change in a disabled plugin')
+        self.begin('plugin-b')
+        self.manager.tracking.abandon()
+        self.assertIsNone(self.manager.tracking.load()['session'])
+        self.assertEqual(target.read_bytes(), b'preexisting change in a disabled plugin')
 
     def test_other_plugin_install_in_window_blocks_attribution(self):
         self.begin()
@@ -333,7 +507,7 @@ class GenericTrackingTests(unittest.TestCase):
         with patch.object(self.manager, 'is_running', return_value=True):
             tracker.tick()
         self.assertIn('无法确认本次启动', tracker.load()['session']['error'])
-        self.assertFalse(tracker.load()['session']['observedRunning'])
+        self.assertEqual(tracker.load()['session']['runState'], 'launching')
         self.assertFalse(tracker.load()['records'])
 
     def test_tray_process_and_unsettled_files_delay_automatic_save(self):
@@ -344,7 +518,7 @@ class GenericTrackingTests(unittest.TestCase):
         with patch.object(self.manager, 'is_running', return_value=True):
             tracker.tick(started + 1)
             tracker.tick(started + 100)
-        self.assertFalse(tracker.load()['session']['runClosed'])
+        self.assertEqual(tracker.load()['session']['runState'], 'running')
         tracker.tick(started + 101)
         changing = self.app / 'late.txt'
         changing.write_bytes(b'late shutdown write')
@@ -431,7 +605,7 @@ class GenericTrackingTests(unittest.TestCase):
         (tracker.root / 'blobs' / original_hash).write_bytes(b'corrupt original')
         self.close_runtime()
         session = self.wait_job(allow_error=True)['session']
-        self.assertIn('快照校验失败', session['error'])
+        self.assertIn('校验失败', session['error'])
         self.assertNotIn('plugin-a', tracker.load()['records'])
         self.assertEqual((self.app / 'main.js').read_bytes(), b'plugin patch')
 
@@ -458,12 +632,75 @@ class GenericTrackingTests(unittest.TestCase):
         tracker = self.manager.tracking
         baseline = tracker.load()['session']['baseline']
         value = tracker.load()
-        value['session']['observedRunning'] = True
+        tracker._transition(value['session'], 'observe_running')
         tracker.save(value)
         with patch.object(tracker, 'metadata', side_effect=PermissionError('synthetic locked file')):
             tracker.tick()
         self.assertIn('locked file', tracker.load()['session']['error'])
         self.assertEqual(tracker.load()['session']['baseline'], baseline)
+
+    def test_failed_scan_retry_reuses_observed_run_without_launching_again(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        baseline = tracker.load()['session']['baseline']
+        launches = self.popen.call_count
+        with patch.object(tracker, 'snapshot', side_effect=PermissionError('scan locked')):
+            self.close_runtime()
+            session = self.wait_job(allow_error=True)['session']
+        self.assertEqual(session['phase'], 'scanning')
+        self.assertEqual(session['runState'], 'closed')
+        self.assertEqual(session['baseline'], baseline)
+        tracker.retry()
+        self.assertIsNone(self.wait_job()['session'])
+        self.assertEqual(self.popen.call_count, launches)
+        self.assertEqual(tracker.load()['records']['plugin-a']['baseline'], baseline)
+
+    def test_retry_validation_failure_after_exit_does_not_restart_first_run(self):
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        launches = self.popen.call_count
+        with patch.object(tracker, '_validate_session', side_effect=TrackingError('temporarily locked')):
+            self.close_runtime()
+            session = self.wait_job(allow_error=True)['session']
+        self.assertEqual(session['phase'], 'recording')
+        self.assertEqual(session['runState'], 'closed')
+        tracker.retry()
+        self.assertIsNone(self.wait_job()['session'])
+        self.assertEqual(self.popen.call_count, launches)
+
+    def test_invalid_session_is_rejected_before_overwriting_registry(self):
+        self.begin()
+        tracker = self.manager.tracking
+        before = tracker.index.read_bytes()
+        value = tracker.load()
+        value['session']['runState'] = 'closed'
+        value['session']['launchAt'] = None
+        with self.assertRaisesRegex(TrackingError, '拒绝保存'):
+            tracker.save(value)
+        self.assertEqual(tracker.index.read_bytes(), before)
+
+    def test_timestamp_change_during_package_capture_keeps_trusted_final_snapshot(self):
+        root_yaml = self.profile / 'cordis.yml'
+        root_yaml.write_bytes(b'generated config')
+        self.begin()
+        self.install_fixture('plugin-a')
+        tracker = self.manager.tracking
+        capture = tracker.versions.package_snapshot
+        def capture_with_metadata_rewrite(*args, **kwargs):
+            result = capture(*args, **kwargs)
+            stamp = root_yaml.stat().st_mtime_ns + 2_000_000_000
+            os.utime(root_yaml, ns=(stamp, stamp))
+            return result
+        with patch.object(tracker.versions, 'package_snapshot', side_effect=capture_with_metadata_rewrite):
+            self.accept()
+        state = tracker.recorded_state(tracker.load())
+        self.assertIsNotNone(state, 'final inventory must retain trusted content evidence')
+        self.assertEqual(state['root_yaml|.']['mtime'], root_yaml.stat().st_mtime_ns)
+        stamp = root_yaml.stat().st_mtime_ns + 2_000_000_000
+        os.utime(root_yaml, ns=(stamp, stamp))
+        tracker.guard(check_files=True)
 
     def test_corrupt_replay_copy_fails_before_any_file_is_changed(self):
         self.begin()
@@ -478,7 +715,7 @@ class GenericTrackingTests(unittest.TestCase):
         second_hash = next(x['after']['hash'] for x in changes if x['key'] == 'app|second.txt')
         (tracker.root / 'blobs' / second_hash).write_bytes(b'corrupt copy')
         raw = self.manifest.read_bytes()
-        with self.assertRaisesRegex(MenuError, '快照校验失败'):
+        with self.assertRaisesRegex(MenuError, '校验失败'):
             self.apply([])
         self.assertEqual(first.read_bytes(), b'first patch')
         self.assertEqual(second.read_bytes(), b'second patch')

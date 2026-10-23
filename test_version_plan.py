@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from launcher import Manager, MenuError
+from file_view import FileView
 from patch_modes import PatchError, PatchModes, file_hash, tree_hash
 from switch_plan import SwitchPlan
 import test_plugin_tracking as helpers
@@ -93,6 +94,66 @@ class VersionPlanTests(unittest.TestCase):
             replay.assert_not_called()
         self.assertEqual(self.manifest.read_bytes(), before)
         self.assertTrue(self.app.exists())
+
+    def test_nested_node_modules_assets_are_captured_and_verified(self):
+        self.install_fixture('plugin-a')
+        root = self.profile / 'node_modules' / 'plugin-a'
+        bundled = root / 'assets' / 'node_modules' / 'bundled.js'
+        bundled.parent.mkdir(parents=True)
+        bundled.write_bytes(b'bundled runtime code')
+        versions = self.manager.tracking.versions
+        reference = versions.package_snapshot('plugin-a')
+        capsule = self.manager.tracking.read_object(reference)
+        self.assertIn('assets/node_modules/bundled.js', capsule['packages']['0']['files'])
+
+        bundled.write_bytes(b'changed bundled runtime code')
+        with self.assertRaisesRegex(PatchError, '依赖内容与版本记录不同'):
+            versions.verify_package('plugin-a', reference)
+
+    def test_optional_peer_does_not_make_required_dependency_optional(self):
+        self.install_fixture('plugin-a')
+        manifest = self.profile / 'node_modules' / 'plugin-a' / 'package.json'
+        meta = json.loads(manifest.read_bytes())
+        meta.update(dependencies={'absent-required': '*'},
+                    peerDependencies={'absent-required': '*'},
+                    peerDependenciesMeta={'absent-required': {'optional': True}})
+        manifest.write_text(json.dumps(meta))
+
+        with self.assertRaisesRegex(PatchError, '插件依赖缺失.*absent-required'):
+            self.manager.tracking.versions.package_snapshot('plugin-a')
+
+    def test_dependency_directory_without_manifest_cannot_select_a_different_parent_package(self):
+        self.install_fixture('plugin-a')
+        root = self.profile / 'node_modules' / 'plugin-a'
+        manifest = root / 'package.json'
+        meta = json.loads(manifest.read_bytes())
+        meta['dependencies'] = {'utility': '*'}
+        manifest.write_text(json.dumps(meta))
+        parent = self.profile / 'node_modules' / 'utility'
+        parent.mkdir()
+        (parent / 'package.json').write_text('{"name":"utility","version":"1"}')
+        local = root / 'node_modules' / 'utility'
+        local.mkdir(parents=True)
+        (local / 'index.js').write_bytes(b'the code Node actually resolves')
+        with self.assertRaisesRegex(PatchError, '依赖缺少 package.json'):
+            self.manager.tracking.versions.package_snapshot('plugin-a')
+
+    def test_loose_dependency_module_cannot_shadow_a_recorded_package(self):
+        self.install_fixture('plugin-a')
+        root = self.profile / 'node_modules' / 'plugin-a'
+        manifest = root / 'package.json'
+        meta = json.loads(manifest.read_bytes())
+        meta['dependencies'] = {'utility': '*'}
+        manifest.write_text(json.dumps(meta))
+        package = root / 'node_modules' / 'utility'
+        package.mkdir(parents=True)
+        (package / 'package.json').write_text('{"name":"utility","version":"1"}')
+        for suffix in ('.js', '.json', '.node'):
+            module = package.with_suffix(suffix)
+            module.write_bytes(b'loose module fixture')
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(PatchError, '依赖被无清单模块遮蔽'):
+                self.manager.tracking.versions.package_snapshot('plugin-a')
+            module.unlink()
 
     def test_upgrade_retains_immutable_old_code_dependencies_and_parent(self):
         file = self.record()
@@ -184,6 +245,46 @@ class VersionPlanTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b'X')
         self.assertEqual(self.manifest.read_bytes(), before)
 
+    def test_untracked_same_timestamp_change_cannot_become_first_native_baseline(self):
+        self.record()
+        tracker = self.manager.tracking
+        previous = tracker.load()
+        self.assertFalse(previous.get('currentCombination'))
+        self.assertFalse(previous.get('nativeBaselines'))
+        target = self.profile / 'cordis.yml'
+        before = target.stat()
+        original = target.read_bytes()
+        self.assertEqual(original.strip(), b'[]')
+        modified = original.replace(b'[]', b'{}')
+        target.write_bytes(modified)
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(tracker.metadata(), tracker.read_object(previous['inventory']))
+        manifest = self.manifest.read_bytes()
+
+        with patch.object(SwitchPlan, 'replay') as replay:
+            with self.assertRaisesRegex(MenuError, '内容变化.*root_yaml'):
+                self.apply([])
+            replay.assert_not_called()
+        self.assertEqual(target.read_bytes(), modified)
+        self.assertEqual(self.manifest.read_bytes(), manifest)
+        self.assertEqual(tracker.load(), previous)
+
+    def test_overlay_restore_reads_blob_without_original_file_timestamp(self):
+        tracker = self.manager.tracking
+        snapshot = tracker.snapshot()
+        target = self.profile / 'cordis.yml'
+        entry = snapshot['root_yaml|.']
+        original = target.read_bytes()
+        target.write_bytes(b'# runtime rewrite\n[]\n')
+        view = FileView([target])
+        blob = tracker.root / 'blobs' / entry['hash']
+
+        self.assertTrue(view.change(target, view.entry(target), entry, tracker.equal, blob))
+        self.assertEqual(view.read_bytes(target), original)
+        with view.open(target) as stream:
+            self.assertEqual(stream.read(), original)
+        self.assertEqual(view.entry(target)['mtime'], entry['mtime'])
+
     def test_corrupt_revision_and_target_blob_stop_before_writes(self):
         file = self.record()
         tracker = self.manager.tracking
@@ -192,7 +293,7 @@ class VersionPlanTests(unittest.TestCase):
         original = path.read_bytes()
         path.write_bytes(original + b' ')
         with patch.object(SwitchPlan, 'replay') as replay:
-            with self.assertRaisesRegex(MenuError, '版本或组合记录校验失败'):
+            with self.assertRaisesRegex(MenuError, '校验失败'):
                 self.apply([])
             replay.assert_not_called()
         path.write_bytes(original)
@@ -201,7 +302,7 @@ class VersionPlanTests(unittest.TestCase):
         digest = next(item['after']['hash'] for item in delta['changes'] if item['key'].endswith('plugin-a.txt'))
         (tracker.root / 'blobs' / digest).write_bytes(b'corrupt')
         with patch.object(SwitchPlan, 'replay') as replay:
-            with self.assertRaisesRegex(MenuError, '快照校验失败'):
+            with self.assertRaisesRegex(MenuError, '校验失败'):
                 self.apply(['plugin-a'])
             replay.assert_not_called()
         self.assertFalse(file.exists())
@@ -239,7 +340,7 @@ class VersionPlanTests(unittest.TestCase):
         plan = self.prepare([])
         for op in plan['operations']:
             planner.replay(op)
-        journal = {'format': 2, 'cursor': len(plan['operations']), 'committed': False, 'plan': tracker.versions.object('transactions', plan)}
+        journal = {'format': 3, 'cursor': len(plan['operations']), 'committed': False, 'plan': tracker.versions.object('transactions', plan)}
         planner.journal.write_text(json.dumps(journal))
         original = SwitchPlan.replay
         def crash(planner, op, undo=False):
@@ -297,7 +398,7 @@ class VersionPlanTests(unittest.TestCase):
         blob.unlink()
         raw = self.manifest.read_bytes()
         with patch('launcher.atomic_write') as write, patch.object(SwitchPlan, 'replay') as replay:
-            with self.assertRaisesRegex(MenuError, '快照缺失'):
+            with self.assertRaisesRegex(MenuError, '缺失或无法读取'):
                 self.apply([])
             self.assertFalse(any(call.args[0] == self.manifest for call in write.call_args_list))
             replay.assert_not_called()
@@ -316,7 +417,7 @@ class VersionPlanTests(unittest.TestCase):
         reference = tracker.load()['currentCombination']
         (tracker.root / reference).write_bytes(b'corrupted combination')
         with patch.object(SwitchPlan, 'replay') as replay:
-            with self.assertRaisesRegex(MenuError, '版本记录校验失败'):
+            with self.assertRaisesRegex(MenuError, '校验失败'):
                 self.apply([])
             replay.assert_not_called()
 
@@ -330,11 +431,32 @@ class VersionPlanTests(unittest.TestCase):
         moved = Path(plan['operations'][count - 1]['dest'])
         unknown = moved / 'new-user-file.txt'
         unknown.write_bytes(b'keep after crash')
-        planner.journal.write_text(json.dumps({'format': 2, 'cursor': count, 'committed': False,
+        planner.journal.write_text(json.dumps({'format': 3, 'cursor': count, 'committed': False,
             'plan': self.manager.tracking.versions.object('transactions', plan)}))
         with self.assertRaisesRegex(PatchError, '改变|改动'):
             planner.recover()
         self.assertEqual(unknown.read_bytes(), b'keep after crash')
+        self.assertTrue(planner.journal.exists())
+
+    def test_same_timestamp_tree_changes_after_interruption_stop_recovery(self):
+        self.record()
+        planner = SwitchPlan(self.manager.tracking)
+        plan = self.prepare([])
+        count = next(i for i, op in enumerate(plan['operations'])
+                     if op.get('kind') == 'move' and op.get('directory')) + 1
+        for op in plan['operations'][:count]:
+            planner.replay(op)
+        target = Path(plan['operations'][count - 1]['dest']) / 'main.js'
+        before = target.stat()
+        modified = b'X' * before.st_size
+        target.write_bytes(modified)
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        planner.journal.write_text(json.dumps({'format': 3, 'cursor': count, 'committed': False,
+            'plan': self.manager.tracking.versions.object('transactions', plan)}))
+
+        with self.assertRaisesRegex(PatchError, '内容.*改变'):
+            planner.recover()
+        self.assertEqual(target.read_bytes(), modified)
         self.assertTrue(planner.journal.exists())
 
     def test_commit_journal_is_small_and_completed_switch_is_not_undone(self):
@@ -343,11 +465,31 @@ class VersionPlanTests(unittest.TestCase):
         plan = self.prepare([])
         receipt = planner.execute(plan)
         # Simulate a crash after the commit marker, before journal removal.
-        planner.journal.write_text(json.dumps({'format': 2, 'cursor': len(plan['operations']), 'committed': True,
+        planner.journal.write_text(json.dumps({'format': 3, 'cursor': len(plan['operations']), 'committed': True,
             'plan': self.manager.tracking.versions.object('transactions', plan)}))
         self.assertLess(planner.journal.stat().st_size, 512)
         planner.recover()
         self.assertEqual(self.manager.tracking.load()['currentCombination'], receipt['plan']['combination'])
+        self.assertFalse(self.app.exists())
+        self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
+
+    def test_committed_journal_cleanup_failure_still_returns_successful_receipt(self):
+        self.record()
+        planner = SwitchPlan(self.manager.tracking)
+        plan = self.prepare([])
+        original_unlink = Path.unlink
+        def locked_journal(path, *args, **kwargs):
+            if path == planner.journal:
+                raise PermissionError('simulated antivirus journal lock')
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', new=locked_journal), self.assertLogs(level='WARNING'):
+            receipt = planner.execute(plan)
+        self.assertEqual(receipt['mode'], 'native')
+        self.assertTrue(json.loads(planner.journal.read_bytes())['committed'])
+        self.assertEqual(self.manager.tracking.load()['currentCombination'], plan['combination'])
+        self.assertFalse(self.app.exists())
+        planner.recover()
+        self.assertFalse(planner.journal.exists())
         self.assertFalse(self.app.exists())
         self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
 
@@ -387,7 +529,7 @@ class VersionPlanTests(unittest.TestCase):
         first = tracker.object('snapshots', snapshot)
         self.assertEqual(first, tracker.object('snapshots', snapshot))
         (tracker.root / first).write_bytes((tracker.root / first).read_bytes() + b' ')
-        with self.assertRaisesRegex(PatchError, '版本或组合记录校验失败'):
+        with self.assertRaisesRegex(PatchError, '校验失败'):
             tracker.read_object(first)
 
     def test_current_package_mutation_while_saving_does_not_publish_revision(self):
@@ -407,6 +549,62 @@ class VersionPlanTests(unittest.TestCase):
         self.assertIn('依赖内容与版本记录不同', session['error'])
         self.assertNotIn('plugin-a', tracker.load()['records'])
         self.assertTrue(session['baseline'])
+
+    def test_invalid_last_operation_is_rejected_before_first_mutation(self):
+        planner = SwitchPlan(self.manager.tracking)
+        plan = self.prepare([])
+        before = self.manifest.read_bytes()
+        for malformed in ({'engine': 'shell', 'kind': 'move'},
+                          {'engine': 'core', 'kind': 'erase'},
+                          {'engine': 'tracking', 'key': 'app|../outside', 'before': None, 'after': {'type': 'dir'}}):
+            modified = copy.deepcopy(plan)
+            modified['operations'].append(malformed)
+            with patch.object(planner, 'replay') as replay:
+                with self.assertRaisesRegex(PatchError, '组合事务记录无效'):
+                    planner.execute(modified)
+                replay.assert_not_called()
+            self.assertFalse(planner.journal.exists())
+            self.assertEqual(self.manifest.read_bytes(), before)
+            self.assertTrue(self.app.exists())
+
+    def test_invalid_recovery_cursor_and_commit_marker_preserve_journal(self):
+        tracker = self.manager.tracking
+        planner = SwitchPlan(tracker)
+        plan = self.prepare([])
+        ref = tracker.versions.object('transactions', plan)
+        before = self.manifest.read_bytes()
+        for changes in ({'cursor': True}, {'committed': 'true'}, {'committed': True}, {'format': 2}):
+            journal = {'format': 3, 'cursor': 0, 'committed': False, 'plan': ref, **changes}
+            planner.journal.write_text(json.dumps(journal), encoding='utf-8')
+            with patch.object(planner, 'replay') as replay:
+                with self.assertRaisesRegex(PatchError, '无效|不一致'):
+                    planner.recover()
+                replay.assert_not_called()
+            self.assertTrue(planner.journal.is_file())
+            self.assertEqual(self.manifest.read_bytes(), before)
+        planner.journal.unlink()
+
+    def test_recovery_validates_all_commands_before_undoing_anything(self):
+        tracker = self.manager.tracking
+        planner = SwitchPlan(tracker)
+        plan = self.prepare([])
+        plan['operations'][0]['engine'] = 'unexpected'
+        planner.journal.parent.mkdir(parents=True, exist_ok=True)
+        planner.journal.write_text(json.dumps({'format': 3, 'cursor': 0, 'committed': False,
+            'plan': tracker.versions.object('transactions', plan)}), encoding='utf-8')
+        with patch.object(planner, 'replay') as replay:
+            with self.assertRaisesRegex(PatchError, '组合事务记录无效'):
+                planner.recover()
+            replay.assert_not_called()
+        self.assertTrue(self.app.exists())
+        self.assertTrue(planner.journal.is_file())
+
+    def test_overlay_rejects_moving_directory_into_itself(self):
+        view = FileView([self.app])
+        before = set(view.entries)
+        with self.assertRaisesRegex(PatchError, '自身'):
+            view.move(self.app, self.app / 'nested')
+        self.assertEqual(set(view.entries), before)
 
 
 if __name__ == '__main__':

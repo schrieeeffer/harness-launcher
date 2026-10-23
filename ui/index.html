@@ -87,6 +87,12 @@
 
       <div id="inlineError" class="inline-error alert" role="alert" hidden></div>
 
+      <section id="connectionWarning" class="notice danger connection-warning" role="alert" hidden>
+        <svg class="icon notice-icon" aria-hidden="true"><use href="#i-alert"/></svg>
+        <div><strong id="connectionTitle"></strong><p id="connectionText"></p></div>
+        <button id="reconnect" class="button">重新连接</button>
+      </section>
+
       <section id="exeWarning" class="notice danger exe-warning" role="alert" hidden>
         <svg class="icon notice-icon" aria-hidden="true"><use href="#i-alert"/></svg>
         <div>
@@ -214,6 +220,13 @@
           <button id="openSource" class="button"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>打开程序目录</button>
         </div>
         <p class="small muted section-note">导出为 JSON 文件，可备份或分享给他人。导入前会先预览：同名方案将被覆盖，含本机未安装插件的方案会被跳过并列出缺少的插件。导入只更新方案列表，不修改 Harness。</p>
+      </section>
+
+      <section class="settings-section">
+        <h3>启动器后台</h3>
+        <p class="small muted">关闭菜单窗口后，后台仍会运行并完成安装记录。再次打开菜单会复用后台，电脑休眠或网页暂停刷新不会让后台自动退出。</p>
+        <div class="section-actions"><button id="quitMenu" class="button">退出启动器后台</button></div>
+        <p class="small muted section-note">退出后，所有已打开的启动菜单都会断开；下次使用请重新双击桌面快捷方式或 launch.vbs。正在安装、记录或切换时会阻止退出。已启动的 Harness 会继续运行。</p>
       </section>
 
       <section class="settings-section">
@@ -445,6 +458,9 @@
     <div class="dialog-actions"><button id="detailAdd" class="button primary" disabled>选用并准备安装</button></div>
   </dialog>
 
+  <script src="/state.js" defer></script>
+  <script src="/api.js" defer></script>
+  <script src="/runtime.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

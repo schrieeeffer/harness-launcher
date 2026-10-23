@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from launcher import Manager, MenuError, OFFICIAL
-from patch_modes import PatchModes, file_hash, tree_hash
+from patch_modes import PatchError, PatchModes, archive_file, archive_info, file_hash, tree_hash
 
 
 def make_asar(path):
@@ -23,6 +23,57 @@ def make_asar(path):
     header = struct.pack('<4I', 4, len(encoded) + 8, len(encoded) + 4, len(encoded))
     path.write_bytes(header + encoded + payload)
     return contents
+
+
+class ArchiveValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.archive = self.root / 'app.asar'
+        self.unpacked = self.root / 'app.asar.unpacked'
+
+    def write_archive(self, files, payload=b''):
+        header = json.dumps({'files': files}).encode()
+        self.archive.write_bytes(struct.pack('<4I', 4, len(header) + 8,
+                                             len(header) + 4, len(header)) + header + payload)
+
+    def test_unpacking_rejects_windows_drive_paths_before_reading(self):
+        self.write_archive({'C:': {'files': {'package.json': {'unpacked': True, 'size': 0}}}})
+        with self.assertRaises(PatchError):
+            archive_info(self.archive, self.unpacked, verify=True)
+        with self.assertRaises(PatchError):
+            archive_file(self.archive, 'C:/package.json', self.unpacked)
+
+    def test_archive_entry_reads_reject_traversal_and_backslashes(self):
+        make_asar(self.archive)
+        for name in (None, '../package.json', r'..\package.json', '/package.json', 'package.json\x00'):
+            with self.subTest(name=name), self.assertRaises(PatchError):
+                archive_file(self.archive, name, self.unpacked)
+
+    def test_unpacked_entries_cannot_follow_a_junction(self):
+        content = b'{"name":"@deepseek-ai/dsh-desktop","version":"1"}'
+        self.unpacked.mkdir()
+        (self.unpacked / 'package.json').write_bytes(content)
+        self.write_archive({'package.json': {'unpacked': True, 'size': len(content)}})
+        is_junction = Path.is_junction
+        with patch.object(Path, 'is_junction', lambda path: path == self.unpacked or is_junction(path)):
+            with self.assertRaises(PatchError):
+                archive_info(self.archive, self.unpacked)
+            with self.assertRaises(PatchError):
+                archive_file(self.archive, 'package.json', self.unpacked)
+
+    def test_invalid_offsets_sizes_and_shapes_raise_controlled_errors(self):
+        entries = [[], {'size': -1, 'offset': '0'}, {'size': True, 'offset': '0'},
+                   {'size': 1, 'offset': '-1'}, {'size': 2 ** 64, 'offset': '0'},
+                   {'size': 0, 'offset': '0', 'integrity': []}]
+        for entry in entries:
+            self.write_archive({'package.json': entry})
+            with self.subTest(entry=entry):
+                with self.assertRaises(PatchError):
+                    archive_info(self.archive, self.unpacked)
+                with self.assertRaises(PatchError):
+                    archive_file(self.archive, 'package.json', self.unpacked)
 
 
 class PatchModeTests(unittest.TestCase):
@@ -94,7 +145,7 @@ class PatchModeTests(unittest.TestCase):
     def test_missing_record_launch_uses_retained_archive_and_preserves_user_rules(self):
         self.switch([])
         self.switch(['dsh-purge'])
-        controller = PatchModes(self.manager)
+        controller = self.manager.tracking.core
         controller.record.unlink()
         self.assertFalse(self.archive.exists())
         self.assertTrue(self.manager.state()['patchMode']['archiveAvailable'])
@@ -113,7 +164,7 @@ class PatchModeTests(unittest.TestCase):
     def test_recapture_prefers_retained_official_archive_over_plugin_backup(self):
         self.switch([])
         self.switch(['dsh-purge'])
-        controller = PatchModes(self.manager)
+        controller = self.manager.tracking.core
         controller.record.unlink()
         backup = self.resources / 'app.asar.bak'
         backup.write_bytes(b'not an official archive')
@@ -125,7 +176,7 @@ class PatchModeTests(unittest.TestCase):
     def test_recapture_rejects_corrupt_retained_archive_without_changing_app(self):
         self.switch([])
         self.switch(['dsh-purge'])
-        controller = PatchModes(self.manager)
+        controller = self.manager.tracking.core
         controller.record.unlink()
         official = controller.stash / 'official.asar'
         original = official.read_bytes()
@@ -150,12 +201,39 @@ class PatchModeTests(unittest.TestCase):
 
     def test_other_program_changes_to_patch_tree_are_preserved(self):
         self.switch([])
-        ctl = PatchModes(self.manager)
+        ctl = self.manager.tracking.core
         changed = ctl.stash / 'app' / 'main.js'
         changed.write_bytes(b'other program changed this')
         with self.assertRaises(MenuError):
             self.switch(['dsh-purge'])
         self.assertEqual(changed.read_bytes(), b'other program changed this')
+        self.assertFalse(self.app.exists())
+
+    def test_timestamp_only_changes_to_captured_trees_do_not_block_switching(self):
+        self.switch([])
+        controller = self.manager.tracking.core
+        for target in (controller.stash / 'app' / 'main.js',
+                       controller.home_stash / 'redteam' / 'preset.yml'):
+            stamp = target.stat().st_mtime_ns + 2_000_000_000
+            os.utime(target, ns=(stamp, stamp))
+
+        self.switch(['dsh-purge'])
+        self.assertEqual((self.app / 'main.js').read_bytes(), b'// existing dsh-purge patch\n')
+        self.switch([])
+        self.assertTrue(self.manager.state()['patchMode']['verifiedNative'])
+
+    def test_same_timestamp_content_change_to_captured_tree_is_rejected(self):
+        self.switch([])
+        controller = self.manager.tracking.core
+        target = controller.stash / 'app' / 'main.js'
+        before = target.stat()
+        modified = b'X' * before.st_size
+        target.write_bytes(modified)
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        with self.assertRaisesRegex(MenuError, '补丁目录有新改动'):
+            self.switch(['dsh-purge'])
+        self.assertEqual(target.read_bytes(), modified)
         self.assertFalse(self.app.exists())
 
     def test_unadapted_plugin_blocks_native_claim_before_mutating_files(self):
@@ -189,7 +267,7 @@ class PatchModeTests(unittest.TestCase):
         self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
         self.assertEqual(self.manifest.read_bytes(), self.initial_manifest)
         self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'Little Code Sauce plugin-owned rule')
-        self.assertEqual(PatchModes(self.manager).load()['mode'], 'captured')
+        self.assertEqual(self.manager.tracking.core.load()['mode'], 'captured')
 
     def test_launch_failure_rolls_back_patch_switch(self):
         with patch('launcher.subprocess.Popen', side_effect=OSError('spawn failed')):
@@ -212,6 +290,38 @@ class PatchModeTests(unittest.TestCase):
         with self.assertRaises(MenuError):
             self.switch(['dsh-purge'])
         self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'new native rule written by user')
+
+    def test_adapter_context_and_archive_source_do_not_depend_on_manager_or_tracker(self):
+        core = self.manager.tracking.core
+        versions = self.manager.tracking.versions
+        self.assertFalse(hasattr(core, 'manager'))
+        self.assertFalse(hasattr(versions, 'tracker'))
+        self.assertIs(versions.host_archive, core.archive_source)
+        self.assertEqual(versions.host_archive.official_archive(), self.archive)
+        self.switch([])
+        self.assertEqual(core.load()['format'], 3)
+
+    def test_adapter_rejects_legacy_or_incomplete_content_identity(self):
+        self.switch([])
+        core = self.manager.tracking.core
+        state = core.load()
+        for alter in (lambda value: value.update(format=2),
+                      lambda value: value.pop('treeContentHash'),
+                      lambda value: value['directories'][0].pop('contentHash')):
+            value = json.loads(json.dumps(state))
+            alter(value)
+            core.record.write_text(json.dumps(value), encoding='utf-8')
+            with self.assertRaisesRegex(PatchError, '补丁记录格式或内容无效'):
+                core.load()
+            self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
+        core.save(state)
+
+    def test_adapter_rejects_noncanonical_target_before_mutating_files(self):
+        core = self.manager.tracking.core
+        target = self.home / 'rules' / '..' / 'AGENTS.md'
+        with self.assertRaisesRegex(PatchError, '非规范'):
+            core.safe(target)
+        self.assertEqual((self.home / 'AGENTS.md').read_bytes(), b'Little Code Sauce plugin-owned rule')
 
 
 

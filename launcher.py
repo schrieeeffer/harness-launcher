@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import copy
 import ctypes
+from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import logging
@@ -22,13 +24,18 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-from patch_modes import PatchModes, PatchError, file_hash
+from patch_modes import PatchError, file_hash
+from adapters import PURGE, is_adapter
+from errors import LauncherError, error_payload
+from settings_store import load_settings, validate_settings
+from storage import atomic_write, write_json
+from operations import OperationLog
 from plugin_tracking import PluginTracking
 from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -112,7 +119,7 @@ def default_executable():
     return str(detect_executable() or install_candidates()[0])
 
 
-class MenuError(Exception):
+class MenuError(LauncherError):
     pass
 
 
@@ -121,24 +128,6 @@ def read_json(path, default=None):
         return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return default
-
-
-def atomic_write(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        with temp.open("wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
-def write_json(path, value):
-    atomic_write(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 def digest(data):
@@ -176,6 +165,10 @@ def running_harness():
             if entry.szExeFile.lower() == "deepseek harness.exe":
                 found.append(entry.th32ProcessID)
             ok = kernel.Process32NextW(handle, ctypes.byref(entry))
+        # Only ERROR_NO_MORE_FILES proves enumeration completed. An access or
+        # snapshot error must not permit patch writes to a running application.
+        if ctypes.get_last_error() != 18:
+            raise MenuError("无法读取运行状态，请稍后重试。")
     finally:
         kernel.CloseHandle(handle)
     return found
@@ -183,22 +176,30 @@ def running_harness():
 
 class Manager:
     def __init__(self, data=DATA, home=None, executable=None):
-        self.data = Path(data)
+        self.data = Path(data).absolute()
+        if self.data.with_name(self.data.name + '.upgrade.json').exists():
+            raise MenuError('目录迁移尚未完成，请退出后运行 migrate.py --recover。', code='migration_pending')
         self.data.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.settings_file = self.data / "settings.json"
-        self.settings = read_json(self.settings_file, {})
-        self.settings.setdefault("home", str(home or os.environ.get("DSH_HOME") or Path.home() / ".dsh"))
-        self.settings.setdefault("executable", str(executable or default_executable()))
-        self.settings.setdefault("schemes", {})
-        self.settings.setdefault("schemeLocks", {})
-        self.settings.setdefault("order", [])
-        self.settings.setdefault("lastSelection", None)
+        self.settings = load_settings(self.settings_file, {
+            'home': str(home or os.environ.get('DSH_HOME') or Path.home() / '.dsh'),
+            'executable': str(executable or default_executable()),
+            'schemes': {}, 'schemeLocks': {}, 'order': [], 'lastSelection': None,
+        })
         if home:
             self.settings["home"] = str(home)
         if executable:
             self.settings["executable"] = str(executable)
+        # Environment variables and saved paths may be relative or use ~.
+        # Resolve them once, before Popen changes cwd to the application folder.
+        for key in ('home', 'executable'):
+            self.settings[key] = str(Path(self.settings[key]).expanduser().resolve())
         self._track_cache = None
+        # Establish the root schema before any tracking object can be created.
+        # A first install must remain reopenable even if settings were never edited.
+        if not self.settings_file.exists():
+            self.persist()
 
     @property
     def tracking(self):
@@ -220,8 +221,11 @@ class Manager:
     def manifest_path(self):
         return self.profile / "package.json"
 
-    def persist(self):
-        write_json(self.settings_file, self.settings)
+    def persist(self, settings=None):
+        candidate = copy.deepcopy(self.settings if settings is None else settings)
+        validate_settings(candidate)
+        write_json(self.settings_file, candidate)
+        self.settings = candidate
 
     def manifest(self):
         try:
@@ -288,12 +292,20 @@ class Manager:
     def backup_list(self):
         folder = self.data / "backups"
         records = []
-        for path in sorted(folder.glob("*.json"), reverse=True)[:100]:
+        for path in sorted(folder.glob("*.json"), reverse=True):
             try:
                 info = read_json(path)
-                if info.get('format') == 2 and info.get("target") == str(self.manifest_path):
-                    records.append({"id": path.name, "time": info["time"],
-                                    "reason": info["reason"], "plugins": info["plugins"]})
+                if (not isinstance(info, dict) or type(info.get('format')) is not int or info['format'] != 3
+                        or info.get("target") != str(self.manifest_path)
+                        or not re.fullmatch(r"[0-9-]+[a-f0-9]{6}\.json", path.name)
+                        or not isinstance(info.get('time'), str) or not isinstance(info.get('reason'), str)
+                        or not isinstance(info.get('plugins'), list)
+                        or any(not isinstance(name, str) or not NAME.fullmatch(name) for name in info['plugins'])):
+                    continue
+                records.append({"id": path.name, "time": info["time"],
+                                "reason": info["reason"], "plugins": info["plugins"]})
+                if len(records) == 100:
+                    break
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
         return records
@@ -302,18 +314,18 @@ class Manager:
         with self.lock:
             raw, obj, bundles = self.manifest()
             plugins = self.discover(obj, bundles)
-            marker = self.home / "dsh-purge" / "installed-rev"
+            marker = PURGE.installed_marker(self.home)
             applied = marker.is_file() and marker.read_text(encoding="utf-8").strip().startswith("apply:")
             tracking = self.tracking.summary()
             tracked = set(tracking['records'])
-            patch_mode = PatchModes(self).summary([p for p in plugins if p['id'] not in tracked])
+            patch_mode = self.tracking.core.summary([p for p in plugins if p['id'] not in tracked])
             patch_mode['managed'] = list(dict.fromkeys(patch_mode['managed'] + list(tracked)))
             patch_mode['supported'] = patch_mode['supported'] or bool(tracked)
             patch_mode['verifiedNative'] = (patch_mode['verifiedNative'] and not tracking['pending']
                                             and not tracking['session'] and not any(r['enabled'] for r in tracking['records'].values()))
             patch_mode['pending'] = patch_mode['pending'] or tracking['pending']
             for plugin in plugins:
-                plugin['tracking'] = ('builtin' if plugin['id'] == 'dsh-purge' else 'auto' if plugin['id'] in tracked else 'untracked')
+                plugin['tracking'] = ('builtin' if is_adapter(plugin['id']) else 'auto' if plugin['id'] in tracked else 'untracked')
             exists = Path(self.settings["executable"]).is_file()
             detected = None if exists else detect_executable()
             return {"version": VERSION, "plugins": plugins, "enabled": [x for x in bundles if x not in OFFICIAL],
@@ -347,7 +359,7 @@ class Manager:
         lock = self.tracking.versions.lock(selected, plugins, self.tracking.load(),
                                           file_hash(Path(self.settings['executable'])))
         write_json(self.data / "backups" / key, {"target": str(self.manifest_path),
-                   "format": 2,
+                   "format": 3,
                    "time": stamp.isoformat(timespec="seconds"), "reason": reason,
                    "plugins": selected, "lock": lock,
                    "content": raw.decode("utf-8-sig"), "bom": raw.startswith(b"\xef\xbb\xbf")})
@@ -355,7 +367,8 @@ class Manager:
 
     def require_stopped(self):
         if running_harness():
-            raise MenuError("Harness 正在运行。请先在托盘中完全退出，再应用或启动；不会强制结束你的会话。")
+            raise MenuError("Harness 正在运行。请先在托盘中完全退出，再应用或启动；不会强制结束你的会话。",
+                            code='harness_running', recovery='在托盘中退出 Harness 后重新操作。', retryable=True)
 
     def is_running(self):
         return bool(running_harness())
@@ -363,7 +376,8 @@ class Manager:
     def require_executable(self):
         # Patch switching and recording locate the install folder from this path.
         if not Path(self.settings["executable"]).is_file():
-            raise MenuError("找不到 Harness 程序。补丁切换和安装记录需要准确的安装目录，请先在设置中修正应用路径。")
+            raise MenuError("找不到 Harness 程序。补丁切换和安装记录需要准确的安装目录，请先在设置中修正应用路径。",
+                            code='missing_executable', recovery='打开设置并选择当前的 DeepSeek Harness.exe。')
 
     def validate_lock(self, lock, selection, plugins):
         if not isinstance(lock, dict):
@@ -378,7 +392,7 @@ class Manager:
         tracker = self.tracking
         tracker.guard(check_files=True)
         registered = set(tracker.load()['records'])
-        unknown = [p['id'] for p in plugins if p['id'] != 'dsh-purge' and p['id'] not in registered]
+        unknown = [p['id'] for p in plugins if not is_adapter(p['id']) and p['id'] not in registered]
         if unknown:
             raise PatchError('这些插件缺少安装前记录，无法可靠切换文件组合：' + '、'.join(unknown) +
                              '。请先恢复干净的安装，再通过启动器安装并自动记录；不能用安装后的快照补记。')
@@ -396,10 +410,11 @@ class Manager:
             try:
                 self.tracking.guard()
             except PatchError as exc:
-                raise MenuError(str(exc)) from exc
+                raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
             raw, obj, bundles = self.manifest()
             if revision != digest(raw):
-                raise MenuError("配置已被 Harness 或其他程序修改，请刷新后重试。")
+                raise MenuError("配置已被 Harness 或其他程序修改，请刷新后重试。", code='revision_conflict',
+                                recovery='刷新实际配置，重新确认插件选择后提交。', retryable=True)
             plugins = self.discover(obj, bundles)
             self.validate_selection(selection, plugins)
             self.require_executable()
@@ -408,7 +423,8 @@ class Manager:
                     raise MenuError('启动方案不存在，请刷新后重试。')
                 if set(self.settings['schemes'][scheme]) != set(selection):
                     raise MenuError('所选插件与保存的方案不同，请刷新后重选。')
-                self.validate_lock(self.settings.get('schemeLocks', {}).get(scheme), selection, plugins)
+                self.validate_lock(self.settings.get('schemeLocks', {}).get(scheme),
+                                   self.settings['schemes'][scheme], plugins)
             exe = Path(self.settings["executable"])
             # Always keep official components; preserve all other JSON fields.
             chosen = set(selection)
@@ -416,8 +432,8 @@ class Manager:
             ordered.extend(x for x in selection if x not in ordered)
             obj["dsh"]["profile"]["bundles"] = ordered
             changed = ordered != bundles
-            controller = PatchModes(self)
-            has_layer = controller.record.is_file() or any(p['id'] == 'dsh-purge' for p in plugins)
+            controller = self.tracking.core
+            has_layer = controller.record.is_file() or any(is_adapter(p['id']) for p in plugins)
             if changed or has_layer:
                 self.backup(raw, bundles, "启动前切换" if launch else "保存插件选择")
                 # Recheck after backup, before the single atomic config replacement.
@@ -435,7 +451,7 @@ class Manager:
                                      creationflags=CREATE_NO_WINDOW,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except PatchError as exc:
-                raise MenuError(str(exc)) from exc
+                raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
             except OSError as exc:
                 if receipt:
                     try:
@@ -443,13 +459,26 @@ class Manager:
                     except Exception as rollback_error:
                         raise MenuError('启动失败且补丁回滚未完成：' + str(rollback_error)) from exc
                 raise MenuError(("启动失败，已恢复切换前配置：" if receipt else "无法完成切换，已停止操作：") + str(exc)) from exc
-            self.settings["order"] = [p["id"] for p in plugins]
-            self.settings["lastSelection"] = list(selection)
-            self.persist()
-            return {"message": ("启动请求已发送" if launch else "插件配置已保存") +
-                    (f" · 已选择 {len(selection)} 个额外插件" if selection else " · 不加载额外插件"),
-                    "changed": changed, "launched": launch,
-                    "patchMode": receipt['mode'] if receipt else None}
+            result = {"message": ("启动请求已发送" if launch else "插件配置已保存") +
+                      (f" · 已选择 {len(selection)} 个额外插件" if selection else " · 不加载额外插件"),
+                      "changed": changed, "launched": launch,
+                      "patchMode": receipt['mode'] if receipt else None}
+            candidate = copy.deepcopy(self.settings)
+            candidate["order"] = [p["id"] for p in plugins]
+            candidate["lastSelection"] = list(selection)
+            try:
+                self.persist(candidate)
+            except OSError:
+                # The file transaction is committed and a launch may already
+                # have been sent. An ancillary preference failure must not
+                # report the completed mutation as failed or trigger rollback.
+                warning = {'code': 'preferences_save_failed',
+                           'message': '操作已完成，但启动偏好保存失败。',
+                           'recovery': '本次配置已生效，无需重复启动或应用。请检查磁盘空间和数据目录权限。'}
+                result['warning'] = warning
+                result['message'] += ' · ' + warning['message'] + warning['recovery']
+                logging.warning('Preferences could not be saved after a completed operation', exc_info=True)
+            return result
 
     def restore(self, backup_id, revision, native=False):
         with self.lock:
@@ -460,9 +489,9 @@ class Manager:
             if revision != digest(raw):
                 raise MenuError("配置已改变，请刷新后再恢复。")
             info = read_json(self.data / "backups" / backup_id)
-            if not info or info.get("target") != str(self.manifest_path):
+            if not isinstance(info, dict) or info.get("target") != str(self.manifest_path):
                 raise MenuError("此备份不属于当前桌面配置。")
-            if info.get('format') != 2:
+            if info.get('format') != 3:
                 raise MenuError('备份需要先通过 migrate.py 转为新版格式。')
             try:
                 restored = json.loads(info["content"])
@@ -470,6 +499,8 @@ class Manager:
                 if not isinstance(restored_bundles, list) or not all(isinstance(x, str) and NAME.fullmatch(x) for x in restored_bundles):
                     raise ValueError()
                 if not all(x in restored_bundles for x in OFFICIAL):
+                    raise ValueError()
+                if len(restored_bundles) != len(set(restored_bundles)):
                     raise ValueError()
             except (ValueError, KeyError, TypeError):
                 raise MenuError("备份内容无效，未作修改。")
@@ -488,19 +519,22 @@ class Manager:
             try:
                 receipt = self.switch_layers(selected, plugins, raw, payload, native and not selected)
             except PatchError as exc:
-                raise MenuError(str(exc)) from exc
+                raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
             if receipt is None:
                 atomic_write(self.manifest_path, payload)
             return {"message": "桌面插件配置已恢复。"}
 
     def scheme(self, name, selection=None, delete=False):
         with self.lock:
+            if type(delete) is not bool:
+                raise MenuError("删除标志必须是布尔值。", code='invalid_request')
             if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
                 raise MenuError("方案名称需为 1–40 个字符。")
             name = name.strip()
+            candidate = copy.deepcopy(self.settings)
             if delete:
-                self.settings["schemes"].pop(name, None)
-                self.settings.setdefault('schemeLocks', {}).pop(name, None)
+                candidate["schemes"].pop(name, None)
+                candidate['schemeLocks'].pop(name, None)
             else:
                 self.require_executable()
                 if len(self.settings["schemes"]) >= 100 and name not in self.settings["schemes"]:
@@ -508,10 +542,11 @@ class Manager:
                 _, obj, bundles = self.manifest()
                 plugins = self.discover(obj, bundles)
                 self.validate_selection(selection, plugins)
-                self.settings["schemes"][name] = list(selection)
-                self.settings['schemeLocks'][name] = self.tracking.versions.lock(
+                lock = self.tracking.versions.lock(
                     selection, plugins, self.tracking.load(), file_hash(Path(self.settings['executable'])))
-            self.persist()
+                candidate["schemes"][name] = list(selection)
+                candidate['schemeLocks'][name] = lock
+            self.persist(candidate)
             return {"message": "方案已删除" if delete else "方案已保存"}
 
     def configure(self, home, executable):
@@ -519,7 +554,7 @@ class Manager:
             try:
                 self.tracking.guard()
             except PatchError as exc:
-                raise MenuError(str(exc)) from exc
+                raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
             if not isinstance(home, str) or not isinstance(executable, str):
                 raise MenuError("路径格式错误。")
             candidate = Path(home).expanduser().resolve()
@@ -561,10 +596,11 @@ class Manager:
                 raise MenuError("导入后将超过 100 个方案，请先移除不用的方案。")
             locks = {name: self.tracking.versions.lock(ids, plugins, self.tracking.load(),
                      file_hash(Path(self.settings['executable']))) for name, ids in normalized.items()}
-            self.settings["schemes"] = merged
+            candidate = copy.deepcopy(self.settings)
+            candidate["schemes"] = merged
             for name in normalized:
-                self.settings['schemeLocks'][name] = locks[name]
-            self.persist()
+                candidate['schemeLocks'][name] = locks[name]
+            self.persist(candidate)
             return {"message": f"已导入 {len(normalized)} 个方案"}
 
 
@@ -572,6 +608,24 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
     catalog = Catalog()
+
+    def __init__(self, *args, **kwargs):
+        self.mutation_lock = threading.Lock()
+        self.operations = OperationLog()
+        self.stopping = threading.Event()
+        super().__init__(*args, **kwargs)
+
+    def request_exit(self):
+        # Called with mutation_lock held: no new HTTP mutation can race shutdown.
+        # The supervisor also uses manager.lock and may have a worker in progress.
+        if not self.manager.lock.acquire(blocking=False):
+            raise MenuError('正在处理文件，请等待完成后再退出启动器后台。')
+        try:
+            if self.manager.tracking.active():
+                raise MenuError('安装记录仍在进行，请等待自动保存或处理异常后再退出启动器后台。')
+            self.stopping.set()
+        finally:
+            self.manager.lock.release()
 
     def server_bind(self):
         # SO_REUSEADDR permits two live listeners on the same Windows port.
@@ -582,22 +636,44 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    body_limit = 65536
+    body_timeout = 2.0
+
     def log_message(self, fmt, *args):
         # Tokens and URLs never enter logs.
         pass
 
     def reply(self, code, body, mime="application/json; charset=utf-8"):
+        if isinstance(body, dict) and 'error' in body and 'code' not in body:
+            codes = {400:'invalid_request', 403:'forbidden', 404:'not_found', 408:'request_timeout',
+                     409:'operation_busy', 413:'request_too_large', 415:'unsupported_media', 503:'service_stopping'}
+            body = error_payload(MenuError(body['error'], code=codes.get(code, 'request_failed'), retryable=code in (408,409,503)))
+        if isinstance(body, dict) and 'error' in body and getattr(self, 'operation_id', None):
+            body['operationId'] = self.operation_id
+            if getattr(self, 'operation_error', None) is None:
+                self.operation_error = MenuError(body['error'], code=body['code'],
+                                                details=body['details'], recovery=body['recovery'], retryable=body['retryable'])
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-        self.end_headers()
-        self.wfile.write(body)
+        # The application outcome is already determined. A tab closing during
+        # response delivery must not relabel a committed mutation as failed or
+        # trigger a second HTTP response on a partially written connection.
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError as exc:
+            self.close_connection = True
+            logging.info('HTTP response delivery ended: operation=%s status=%s cause=%s',
+                         getattr(self, 'operation_id', None), code, type(exc).__name__)
+            return False
+        return True
 
     def authorized(self, document=False):
         expected = f"127.0.0.1:{self.server.server_port}"
@@ -606,26 +682,31 @@ class Handler(BaseHTTPRequestHandler):
         supplied = self.headers.get("Authorization", "").removeprefix("Bearer ")
         if document:
             supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
-        if not secrets.compare_digest(supplied, self.server.token):
+        if not secrets.compare_digest(supplied.encode('utf-8'), self.server.token.encode('utf-8')):
             return False
         origin = self.headers.get("Origin")
         return origin in (None, "http://" + expected)
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in ("/style.css", "/app.js"):
+        if path in ("/style.css", "/state.js", "/api.js", "/runtime.js", "/app.js"):
             if self.headers.get("Host") != f"127.0.0.1:{self.server.server_port}":
                 return self.reply(403, {"error": "Forbidden"})
             return self.reply(200, (ROOT / "ui" / path[1:]).read_bytes(),
                               "text/css; charset=utf-8" if path.endswith(".css") else "text/javascript; charset=utf-8")
         if not self.authorized(document=path == "/"):
             return self.reply(403, {"error": "请从桌面快捷方式打开启动菜单。"})
-        self.server.last_seen = time.monotonic()
+        if self.server.stopping.is_set():
+            return self.reply(503, {"error": "启动器后台正在退出，请重新打开启动菜单。"})
         try:
             if path == "/":
                 return self.reply(200, (ROOT / "ui" / "index.html").read_bytes(), "text/html; charset=utf-8")
             if path == "/api/state":
                 return self.reply(200, self.server.manager.state())
+            if path == '/api/operations':
+                return self.reply(200, self.server.operations.snapshot())
+            if path == '/api/storage':
+                return self.reply(200, self.server.manager.tracking.store.statistics())
             if path == '/api/settings':
                 manager = self.server.manager
                 return self.reply(200, {'home': str(manager.home), 'executable': manager.settings['executable'],
@@ -656,27 +737,88 @@ class Handler(BaseHTTPRequestHandler):
             self.error(exc)
 
     def error(self, exc):
-        if not isinstance(exc, (MenuError, CatalogError, PatchError)):
+        expected = isinstance(exc, (LauncherError, CatalogError))
+        if not expected:
             logging.exception("Launcher operation failed")
-        self.reply(400 if isinstance(exc, (MenuError, CatalogError, PatchError)) else 500,
-                   {"error": str(exc) if isinstance(exc, (MenuError, CatalogError, PatchError)) else "操作失败，详情已记录在 launcher.log。"})
+        public = exc if expected else MenuError('操作失败，详情已记录在 launcher.log。', code='internal_error')
+        self.operation_error = public
+        self.reply(400 if expected else 500, error_payload(public, getattr(self, 'operation_id', None)))
 
     def do_POST(self):
+        self.operation_id = None
+        self.operation_error = None
+        # Consume ordinary request bodies before responding or taking the global
+        # mutation lock. Closing a Windows socket with unread request bytes can
+        # reset the connection before the client receives the error response.
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            return self.reply(400, {'error': '请求格式错误。'})
+        if size < 0 or size > self.body_limit:
+            return self.reply(413, {'error': '请求过大'})
+        try:
+            body = self.read_request_body(size)
+        except TimeoutError:
+            return self.reply(408, {'error': '读取请求超时，请重试。'})
+        except MenuError as exc:
+            return self.reply(400, {'error': str(exc)})
         if not self.authorized():
             return self.reply(403, {"error": "Forbidden"})
         if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
             return self.reply(415, {"error": "JSON required"})
-        self.server.last_seen = time.monotonic()
+        if not self.server.mutation_lock.acquire(blocking=False):
+            return self.reply(409, {"error": "另一项操作正在进行，请等待完成后重试。"})
         try:
-            size = int(self.headers.get("Content-Length", "0"))
-            if size < 0 or size > 65536:
-                return self.reply(413, {"error": "请求过大"})
-            body = json.loads(self.rfile.read(size))
+            if self.server.stopping.is_set():
+                return self.reply(503, {"error": "启动器后台正在退出，请重新打开启动菜单。"})
+            self.operation_error = None
+            try:
+                self.operation_id = self.server.operations.begin(urlparse(self.path).path.removeprefix('/api/'))
+            except LauncherError as exc:
+                return self.error(exc)
+            self.post(body)
+        finally:
+            if getattr(self, 'operation_id', None):
+                self.server.operations.finish(self.operation_id, self.operation_error)
+            self.server.mutation_lock.release()
+            if self.server.stopping.is_set():
+                # Stop even if the requesting tab closes before receiving the reply.
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+    def read_request_body(self, size):
+        deadline = time.perf_counter() + self.body_timeout
+        previous_timeout = self.connection.gettimeout()
+        chunks = []
+        remaining = size
+        try:
+            while remaining:
+                available = deadline - time.perf_counter()
+                if available <= 0:
+                    raise TimeoutError()
+                self.connection.settimeout(available)
+                # read1 performs at most one socket read, letting the deadline
+                # cap the entire body even when a client trickles in bytes.
+                chunk = self.rfile.read1(remaining)
+                if not chunk:
+                    raise MenuError('请求体不完整，请重试。')
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b''.join(chunks)
+        finally:
+            self.connection.settimeout(previous_timeout)
+
+    def post(self, raw):
+        response_code = 200
+        try:
+            body = json.loads(raw)
             if not isinstance(body, dict):
                 raise MenuError("请求格式错误。")
             path = urlparse(self.path).path
             manager = self.server.manager
-            if path in ("/api/apply", "/api/launch"):
+            if path == '/api/quit':
+                self.server.request_exit()
+                result = {'message': '启动器后台已退出。下次使用请重新打开启动菜单。'}
+            elif path in ("/api/apply", "/api/launch"):
                 result = manager.apply(body.get("selection"), body.get("revision"), launch=path.endswith("launch"),
                                        native=body.get('native', False) is True, scheme=body.get('scheme'))
             elif path == "/api/scheme":
@@ -700,7 +842,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         raise MenuError('未知记录操作。')
                 except PatchError as exc:
-                    raise MenuError(str(exc)) from exc
+                    raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
             elif path == "/api/open":
                 folders = {"profile": manager.profile, "backups": manager.data / "backups", "source": ROOT}
                 target = folders.get(body.get("target"))
@@ -710,12 +852,14 @@ class Handler(BaseHTTPRequestHandler):
                 os.startfile(str(target))
                 result = {"message": "已打开目录。"}
             else:
-                return self.reply(404, {"error": "Not found"})
-            self.reply(200, result)
+                response_code, result = 404, {"error": "Not found"}
         except (ValueError, UnicodeDecodeError) as exc:
-            self.reply(400, {"error": "请求格式错误。"})
+            return self.error(MenuError('请求格式错误。', code='invalid_request'))
         except Exception as exc:
-            self.error(exc)
+            return self.error(exc)
+        # Keep response serialization/delivery outside the business exception
+        # boundary. None of its failures can undo an already returned result.
+        return self.reply(response_code, dict(result, operationId=getattr(self, 'operation_id', None)))
 
 
 def open_window(url):
@@ -729,16 +873,61 @@ def open_window(url):
         webbrowser.open(url)
 
 
+@contextmanager
+def instance_lock(data):
+    """Hold one OS lock per data directory for the server's complete lifetime."""
+    # Keep the file after unlock: unlinking it could let another process lock a
+    # new file while the previous inode is still owned by a running service.
+    with (Path(data) / 'instance.lock').open('a+b') as stream:
+        if stream.tell() == 0:
+            stream.write(b'\0')
+            stream.flush()
+        stream.seek(0)
+        owned = False
+        try:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                owned = True
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+            yield owned
+        finally:
+            if owned:
+                stream.seek(0)
+                if os.name == 'nt':
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
 def main():
+    if sys.version_info < (3, 12):
+        raise MenuError('需要 Python 3.12 或更高版本，请使用 Harness 自带的 Python 或 launch.vbs 启动。',
+                        code='unsupported_python')
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--data", type=Path, default=DATA)
     args = parser.parse_args()
+    if args.data.with_name(args.data.name + '.upgrade.json').exists():
+        raise MenuError('目录迁移尚未完成，请先运行 migrate.py --recover。')
     args.data.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=args.data / "launcher.log", level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
     if any((args.data / name).exists() for name in ('import-pending.json', 'migration-pending.json')):
         raise MenuError('数据迁移尚未结束，请先运行 migrate.py --apply。')
+    with instance_lock(args.data) as owned:
+        serve(args, owned)
+
+
+def serve(args, owned):
+    if args.data.with_name(args.data.name + '.upgrade.json').exists():
+        raise MenuError('目录迁移尚未完成，请先运行 migrate.py --recover。')
     # Fixed loopback port makes repeated shortcuts reopen the same local menu.
     port = 17643
     instance_path = args.data / "instance.json"
@@ -762,6 +951,16 @@ def main():
         return None
 
     existing = existing_instance()
+    if not owned:
+        # Another launcher can own the data before its instance.json is ready,
+        # including when the usual port belongs to an unrelated application.
+        for _ in range(10):
+            if existing:
+                break
+            time.sleep(0.15)
+            existing = existing_instance()
+        if not existing:
+            raise MenuError('启动器后台正在启动或退出，请稍后重新打开启动菜单。')
     if existing:
         if not args.no_open:
             open_window(existing)
@@ -781,48 +980,46 @@ def main():
             return
         # Use an ephemeral port if another application occupies the default.
         server = Server(("127.0.0.1", 0), Handler)
-    server.token = secrets.token_urlsafe(32)
-    server.manager = Manager(args.data)
-    server.last_seen = time.monotonic()
-    url = f"http://127.0.0.1:{server.server_port}/?token={server.token}"
-    write_json(instance_path, {"url": url, "pid": os.getpid()})
-
     monitor_stop = threading.Event()
-
-    def supervise():
-        while not monitor_stop.wait(1):
-            try:
-                server.manager.tracking.tick()
-            except Exception:
-                logging.exception('Automatic installation supervisor failed; records retained')
-
-    def expire():
-        while time.monotonic() - server.last_seen < 300 or server.manager.tracking.active():
-            time.sleep(10)
-        server.shutdown()
-
-    threading.Thread(target=expire, daemon=True).start()
-    threading.Thread(target=supervise, daemon=True).start()
-    if not args.no_open:
-        open_window(url)
+    url = None
     try:
+        server.token = secrets.token_urlsafe(32)
+        server.manager = Manager(args.data)
+        url = f"http://127.0.0.1:{server.server_port}/?token={server.token}"
+        write_json(instance_path, {"url": url, "pid": os.getpid()})
+
+        def supervise():
+            while not monitor_stop.wait(1):
+                try:
+                    server.manager.tracking.tick()
+                except Exception:
+                    logging.exception('Automatic installation supervisor failed; records retained')
+
+        # Browser timers may stop in sleeping/background windows. Missing heartbeats
+        # are not proof that the menu was closed; only an explicit quit stops us.
+        threading.Thread(target=supervise, daemon=True).start()
+        if not args.no_open:
+            open_window(url)
         server.serve_forever(poll_interval=0.5)
     finally:
         monitor_stop.set()
         server.server_close()
         try:
-            if read_json(instance_path, {}).get("pid") == os.getpid():
+            instance = read_json(instance_path, {})
+            if url and isinstance(instance, dict) and instance.get('url') == url:
                 instance_path.unlink(missing_ok=True)
-        except OSError:
+        except (OSError, ValueError):
             pass
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as exc:
         logging.exception("Launcher startup failed")
-        if os.name == "nt":
-            ctypes.windll.user32.MessageBoxW(None, "启动菜单未能打开，请检查 " + str(DATA / 'launcher.log'), "Harness 启动菜单", 0x10)
-        else:
-            raise
+        message = str(exc) if isinstance(exc, LauncherError) else '启动失败，请查看数据目录中的 launcher.log。'
+        if os.name == 'nt' and '--no-open' not in sys.argv:
+            ctypes.windll.user32.MessageBoxW(None, message, 'Harness Launcher', 0x10)
+        elif sys.stderr is not None:
+            print(message, file=sys.stderr)
+        raise SystemExit(1)

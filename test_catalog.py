@@ -33,6 +33,20 @@ class CatalogTests(unittest.TestCase):
         self.assertFalse(result['installable'])
         self.assertTrue(result['notice'])
 
+    def test_empty_patch_path_and_invalid_version_are_not_installable(self):
+        for path in ['', '   ']:
+            with self.subTest(path=path), patch.object(self.catalog, 'fetch', return_value=self.metadata(dsh={'bundle': {'patch': path}})):
+                self.catalog.cache.clear()
+                result = self.catalog.detail('dsh-example')
+                self.assertFalse(result['bundle'])
+                self.assertFalse(result['installable'])
+        self.catalog.cache.clear()
+        with patch.object(self.catalog, 'fetch', return_value=self.metadata(version='latest')):
+            result = self.catalog.detail('dsh-example')
+        self.assertTrue(result['bundle'])
+        self.assertFalse(result['installable'])
+        self.assertIn('版本', result['notice'])
+
     def test_unsafe_metadata_links_are_removed(self):
         with patch.object(self.catalog, 'fetch', return_value=self.metadata(homepage='javascript:alert(1)', repository={'url': 'https://user:secret@example.org'})):
             result = self.catalog.detail('dsh-example')
@@ -65,6 +79,14 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertFalse(more)
         fetch.assert_not_called()
+
+    def test_final_supported_page_does_not_offer_an_invalid_next_page(self):
+        result = {'objects': [{'package': {'name': 'dsh-example', 'version': '1.2.3'}}], 'total': 10000}
+        with patch.object(self.catalog, 'fetch', return_value=result):
+            self.assertTrue(self.catalog.search('example', 'community', 19)['hasMore'])
+            last = self.catalog.search('example', 'community', 20)
+        self.assertTrue(last['items'])
+        self.assertFalse(last['hasMore'])
 
     def test_partial_provider_failure_keeps_other_results_and_reports_source(self):
         def provider(query, source, page, registry):
@@ -101,6 +123,39 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result['source'], 'git+https://github.com/example/plugin.git')
         self.assertEqual(result['kind'], 'community')
         self.assertTrue(result['installable'])
+
+    def test_github_malformed_manifest_response_reports_catalog_error(self):
+        for value in [None, [], {'encoding': 'base64', 'size': None, 'content': ''},
+                      {'encoding': 'base64', 'size': 0, 'content': base64.b64encode(b' ' * (256 * 1024 + 1)).decode()}]:
+            with self.subTest(value_type=type(value).__name__), patch.object(self.catalog, 'fetch', return_value=value):
+                with self.assertRaises(CatalogError):
+                    self.catalog.detail('example/plugin', 'github')
+
+    def test_search_rejects_malformed_envelopes_as_catalog_errors(self):
+        for source, items, total in [('community', 'objects', 'total'), ('github', 'items', 'total_count')]:
+            for value in [None, [], {}, {items: None}, {items: [], total: 'many'}, {items: [], total: True}]:
+                with self.subTest(source=source, value=value), patch.object(self.catalog, 'fetch', return_value=value):
+                    with self.assertRaises(CatalogError):
+                        self.catalog.search('tools', source)
+
+    def test_malformed_search_response_uses_last_successful_cache(self):
+        with patch.object(self.catalog, 'fetch', return_value={'objects': [{'package': {'name': 'dsh-example'}}], 'total': 1}):
+            self.catalog.search('tools', 'community')
+        key = ('search', 'tools', 'community', 0, 'npm')
+        self.catalog.cache[key] = (0, self.catalog.cache[key][1])
+        with patch.object(self.catalog, 'fetch', return_value={'objects': None}):
+            result = self.catalog.search('tools', 'community')
+        self.assertTrue(result['stale'])
+        self.assertEqual(result['items'][0]['name'], 'dsh-example')
+        self.assertIn('格式无效', result['warning'])
+
+    def test_search_skips_malformed_rows_and_normalizes_invalid_star_counts(self):
+        with patch.object(self.catalog, 'fetch', return_value={'objects': [None, 1, {'package': None}, {'package': {'name': 'dsh-good'}}], 'total': 4}):
+            result = self.catalog.search('tools', 'community')
+        self.assertEqual([item['name'] for item in result['items']], ['dsh-good'])
+        with patch.object(self.catalog, 'fetch', return_value={'items': [None, {'full_name': None}, {'full_name': 'example/plugin', 'stargazers_count': None}], 'total_count': 3}):
+            result = self.catalog.search('tools', 'github')
+        self.assertEqual([(item['name'], item['stars']) for item in result['items']], [('example/plugin', 0)])
 
     def test_github_query_cannot_escape_topic_with_search_qualifiers(self):
         with patch.object(self.catalog, 'fetch', return_value={'items': [], 'total_count': 0}) as fetch:
@@ -186,6 +241,17 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(CatalogError) as caught:
                 self.catalog.leaderboard()
         self.assertIn('registry.npmjs.org', str(caught.exception))
+
+    def test_leaderboard_keeps_valid_pages_when_another_page_is_malformed(self):
+        def fetch(url):
+            offset = int(parse_qs(urlparse(url).query)['from'][0])
+            if offset == 250:
+                return None
+            return {'objects': [None, {'package': None}, {'package': {'name': 'dsh-good'}, 'downloads': {'weekly': 20, 'monthly': 40}}], 'total': 1}
+        with patch.object(self.catalog, 'fetch', side_effect=fetch):
+            result = self.catalog.leaderboard()
+        self.assertEqual([item['name'] for item in result['items']], ['dsh-good'])
+        self.assertIn('1 页', result['warning'])
 
     def test_unknown_leaderboard_is_rejected_before_network(self):
         with patch.object(self.catalog, 'fetch') as fetch:

@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 from pathlib import Path
 import time
 import uuid
 
 from file_view import FileView
+from domain import digest, object_reference
+from operation_models import OperationError, decode_operation, validate_operations
+from recording_state import validate_registry
 from patch_modes import PatchError, archive_info, file_hash, put, tree_hash
 
 
@@ -22,11 +26,7 @@ class SwitchPlan:
 
     def roots(self):
         roots = list(self.tracker.scopes.values())
-        roots += [self.core.stash / 'app', self.core.stash / 'official.asar',
-                  self.core.home_stash / 'redteam', self.manager.manifest_path]
-        roots += [self.manager.home / (name + '.dsh-purge-rule.bak')
-                  for name in ('AGENTS.md', 'CLAUDE.md', 'prompt-inject.md')]
-        roots += [self.core.resources / 'runtime' / 'cli' / 'bin' / 'dsh.cmd.dsh-purge.bak']
+        roots += [self.manager.manifest_path, *self.core.extra_roots()]
         return roots
 
     def _generic(self, view, operations, result, plugin, support=None):
@@ -71,6 +71,7 @@ class SwitchPlan:
                 source, dest = Path(op['source']), Path(op['dest'])
                 op['fingerprint'] = view.tree_hash(source) if view.is_dir(source) else view.hash(source)
                 op['directory'] = view.is_dir(source)
+                op['contentFingerprint'] = view.tree_hash(source, content=True) if op['directory'] else view.hash(source)
                 view.move(source, dest)
                 operations.append(op)
             else:
@@ -113,6 +114,14 @@ class SwitchPlan:
             return self._prepare(selection, plugins, before, after, native, old, previous_core, view)
 
     def _prepare(self, selection, plugins, before, after, native, old, previous_core, view):
+        if old.get('inventory'):
+            recorded = self.tracker.recorded_state(old)
+            if recorded is not None:
+                expected = self.tracker.versions.content_state(recorded)
+                actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes))
+                changed = [key for key in set(expected) | set(actual) if expected.get(key) != actual.get(key)]
+                if changed:
+                    raise PatchError('记录窗口外发生了文件内容变化，未开始切换：' + '、'.join(sorted(changed)[:4]))
         initial = copy.deepcopy(view)
         operations = []
         new = copy.deepcopy(old)
@@ -170,12 +179,48 @@ class SwitchPlan:
         # Hash the entire input, including parked adapter files. Rechecked before
         # the first mutation; no timestamps are trusted as content validation.
         expected = self._signature(initial)
-        return {'operations': operations, 'previous': old, 'new': new,
+        plan = {'operations': operations, 'previous': old, 'new': new,
                 'previousCore': previous_core or (core_plan['previous'] if core_plan else None),
                 'newCore': core_plan['state'] if core_plan else None,
                 'inputCore': previous_core, 'selection': list(selection),
                 'mode': 'plugin' if selection else 'native', 'expected': expected, 'target': target,
                 'host': host, 'combination': reference}
+        self.validate(plan)
+        return plan
+
+    def validate(self, plan):
+        """Decode the whole command list before the first filesystem write."""
+        try:
+            if not isinstance(plan, dict):
+                raise ValueError('Plan must be an object')
+            if plan.get('requiredFeatures', []) != []:
+                raise ValueError('Unsupported required transaction features')
+            validate_operations(plan['operations'])
+            digest(plan['host'])
+            object_reference(plan['combination'], 'combinations')
+            if (not isinstance(plan['selection'], list)
+                    or any(not isinstance(name, str) for name in plan['selection'])
+                    or len(set(plan['selection'])) != len(plan['selection'])
+                    or plan['mode'] != ('plugin' if plan['selection'] else 'native')):
+                raise ValueError('Invalid plan selection')
+            for key in ('previous', 'new'):
+                validate_registry(plan[key])
+            for key in ('previousCore', 'inputCore', 'newCore'):
+                if plan[key] is not None:
+                    self.core.validate_state(plan[key])
+            if not isinstance(plan['expected'], dict) or not isinstance(plan['target'], dict):
+                raise ValueError('Invalid state signature')
+            for op in plan['operations']:
+                if op['engine'] == 'tracking':
+                    self.tracker.target(op['key'])
+                elif op['kind'] == 'file':
+                    self.core.safe(Path(op['path']))
+                else:
+                    self.core.safe(Path(op['source']))
+                    self.core.safe(Path(op['dest']))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PatchError('组合事务记录无效，未修改文件：' + str(exc)) from exc
+        return plan
 
     @staticmethod
     def _signature(view):
@@ -192,6 +237,10 @@ class SwitchPlan:
         return dest.exists() and not source.exists(), source.exists() and not dest.exists()
 
     def replay(self, op, undo=False):
+        try:
+            decode_operation(op)
+        except OperationError as exc:
+            raise PatchError('组合操作记录无效：' + str(exc)) from exc
         if op['engine'] == 'tracking':
             self.tracker.replay([op], undo=undo)
             return
@@ -200,6 +249,9 @@ class SwitchPlan:
             signature = tree_hash(at) if op['directory'] else file_hash(at)
             if signature != op['fingerprint']:
                 raise PatchError('目录或归档在预检后改变，已停止切换：' + str(at))
+            content_signature = tree_hash(at, content=True) if op['directory'] else file_hash(at)
+            if content_signature != op['contentFingerprint']:
+                raise PatchError('目录或归档内容在预检后改变，已停止切换：' + str(at))
         self.core.replay([op], undo=undo)
         if op['kind'] == 'file':
             mtime = op.get('beforeMtime' if undo else 'afterMtime')
@@ -216,6 +268,7 @@ class SwitchPlan:
     def execute(self, plan):
         self.manager.require_stopped()
         self.manager.require_executable()
+        self.validate(plan)
         if self.tracker.load() != plan['previous'] or self.core.load() != plan['inputCore']:
             raise PatchError('预检后版本索引发生变化，未开始切换，请刷新重试。')
         _, obj, bundles = self.manager.manifest()
@@ -224,7 +277,7 @@ class SwitchPlan:
             raise PatchError('Harness 在预检后发生更新，未开始切换。')
         if self._signature(FileView(self.roots())) != plan['expected']:
             raise PatchError('预检后文件发生变化，未开始切换，请刷新重试。')
-        journal = {'format': 2, 'id': uuid.uuid4().hex, 'cursor': 0, 'committed': False,
+        journal = {'format': 3, 'id': uuid.uuid4().hex, 'cursor': 0, 'committed': False,
                    'plan': self.tracker.versions.object('transactions', plan)}
         put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
         try:
@@ -242,20 +295,28 @@ class SwitchPlan:
             self.tracker.save(plan['new'])
             journal['committed'] = True
             put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
-            self.journal.unlink()
         except Exception as error:
             try:
                 self.recover(notify=False)
             except Exception as rollback_error:
                 raise PatchError('组合切换和回滚未完成，请保留快照与 switch.json：' + str(rollback_error)) from error
             raise PatchError('组合切换失败，已恢复切换前状态：' + str(error)) from error
+        # Once the commit marker is durable, cleanup cannot turn this into a
+        # failed switch: recovery deliberately preserves committed file state.
+        # Leave the marker for the next recovery if antivirus/permissions hold
+        # the journal open, and still return the receipt needed for launch undo.
+        try:
+            self.journal.unlink()
+        except OSError:
+            logging.warning('Committed switch journal could not be removed', exc_info=True)
         return {'plan': plan, 'mode': plan['mode']}
 
     def rollback(self, receipt):
         plan = receipt['plan']
+        self.validate(plan)
         # Launch may fail after the switch commit. Make its rollback recoverable
         # as well; repeating the recovery after a crash is idempotent.
-        journal = {'format': 2, 'cursor': len(plan['operations']), 'committed': False,
+        journal = {'format': 3, 'cursor': len(plan['operations']), 'committed': False,
                    'plan': self.tracker.versions.object('transactions', plan)}
         put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
         self.recover(notify=False)
@@ -264,17 +325,24 @@ class SwitchPlan:
         if not self.journal.exists():
             return
         self.manager.require_stopped()
-        journal = json.loads(self.journal.read_bytes())
-        if journal.get('format') != 2:
-            raise PatchError('组合恢复日志格式无效，请保留原始日志。')
+        try:
+            journal = json.loads(self.journal.read_bytes())
+            if (not isinstance(journal, dict) or type(journal.get('format')) is not int or journal['format'] != 3
+                    or type(journal.get('committed')) is not bool):
+                raise ValueError('Invalid journal envelope')
+            object_reference(journal['plan'], 'transactions')
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PatchError('组合恢复日志格式无效，请保留原始日志。') from exc
+        plan = self.validate(self.tracker.read_object(journal['plan']))
+        operations = plan['operations']
+        count = journal.get('cursor')
+        if type(count) is not int or not 0 <= count <= len(operations):
+            raise PatchError('组合恢复位置无效，请保留原始日志。')
+        if journal['committed'] and count != len(operations):
+            raise PatchError('组合提交标记与操作位置不一致，请保留原始日志。')
         if journal.get('committed'):
             self.journal.unlink()
             return
-        plan = self.tracker.read_object(journal['plan'])
-        operations = plan['operations']
-        count = journal['cursor']
-        if not isinstance(count, int) or not 0 <= count <= len(operations):
-            raise PatchError('组合恢复位置无效，请保留原始日志。')
         if count < len(operations):
             after, before = self._after(operations[count])
             if after and not before:

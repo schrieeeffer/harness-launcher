@@ -13,11 +13,11 @@ from pathlib import Path
 import re
 import stat
 import struct
-import uuid
 
-
-class PatchError(Exception):
-    pass
+from adapters import HostArchive, PURGE
+from domain import digest, object_reference
+from errors import PatchError
+from storage import ContentStore, atomic_write as put
 
 
 def sha(data):
@@ -34,28 +34,14 @@ def file_hash(path):
     return h.hexdigest()
 
 
-def put(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
-    try:
-        with temp.open('wb') as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+def tree_hash(root, view=None, *, content=False):
+    """Fingerprint a tree by metadata or by file contents and link targets.
 
-
-def tree_hash(root, view=None):
-    """Fast change fingerprint: metadata for files, targets for junctions.
-
-    The official archive is verified by content separately. Reading every DLL/JS
-    in the extracted tree triggers very slow per-file antivirus scans on Windows;
-    size/mtime/identity detect normal edits without opening thousands of files.
+    Content fingerprints identify captured layers; metadata fingerprints also
+    detect concurrent mutation between planning and execution.
     """
     if view is not None:
-        return view.tree_hash(root)
+        return view.tree_hash(root, content=content)
     if not root.is_dir() or root.is_symlink() or root.is_junction():
         raise PatchError(f'补丁目录不可用或被替换为链接：{root}')
     h = hashlib.sha256()
@@ -70,7 +56,7 @@ def tree_hash(root, view=None):
                 line = ['dir', relative]
                 visit(path)
             elif stat.S_ISREG(info.st_mode):
-                line = ['file', relative, info.st_size, info.st_mtime_ns]
+                line = ['file', relative, file_hash(path)] if content else ['file', relative, info.st_size, info.st_mtime_ns]
             else:
                 raise PatchError(f'无法核验补丁文件：{path}')
             h.update(json.dumps(line, ensure_ascii=False).encode('utf-8'))
@@ -78,18 +64,61 @@ def tree_hash(root, view=None):
     return h.hexdigest()
 
 
+def _archive_parts(name):
+    if not isinstance(name, str) or any(char in name for char in ('\\', ':', '\x00')):
+        raise ValueError('path')
+    parts = name.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise ValueError('path')
+    return parts
+
+
+def _archive_content(stream, base, value, name, unpacked, view):
+    """Bound archive reads and prevent unpacked entries escaping via links."""
+    parts = _archive_parts(name)
+    size = value.get('size')
+    if type(size) is not int or size < 0 or 'link' in value:
+        raise ValueError('size or link')
+    if value.get('unpacked'):
+        path = unpacked.joinpath(*parts)
+        for ancestor in (path, *path.parents):
+            if ancestor.is_symlink() or ancestor.is_junction():
+                raise ValueError('unpacked link')
+        content = view.read_bytes(path) if view else path.read_bytes()
+    else:
+        offset = value.get('offset')
+        if (type(offset) is not int and (not isinstance(offset, str) or not re.fullmatch(r'[0-9]+', offset))):
+            raise ValueError('offset')
+        offset = int(offset)
+        stream.seek(0, os.SEEK_END)
+        if offset < 0 or base + offset + size > stream.tell():
+            raise ValueError('offset or size')
+        stream.seek(base + offset)
+        content = stream.read(size)
+    if len(content) != size:
+        raise ValueError('size')
+    integrity = value.get('integrity')
+    if integrity is not None and (not isinstance(integrity, dict)
+            or integrity.get('algorithm') != 'SHA256' or sha(content) != integrity.get('hash')):
+        raise PatchError('官方归档或其解包依赖的完整性校验失败：' + name)
+    return content
+
+
 def archive_info(archive, unpacked, verify=False, view=None):
     """Read ASAR without executing its code. Validate shipped integrity records."""
     try:
         with (view.open(archive) if view else archive.open('rb')) as stream:
             header = struct.unpack('<4I', stream.read(16))
-            if header[0] != 4 or not (0 < header[3] < 32 * 1024 * 1024):
+            if (header[0] != 4 or not (0 < header[3] < 32 * 1024 * 1024)
+                    or header[1] < header[3] + 8):
                 raise ValueError('header')
             tree = json.loads(stream.read(header[3]))
             base = 8 + header[1]
             def entries(node, prefix=''):
+                if not isinstance(node, dict) or not isinstance(node.get('files'), dict):
+                    raise ValueError('directory')
                 for name, value in node.get('files', {}).items():
-                    if name in ('.', '..') or '/' in name or '\\' in name:
+                    if len(_archive_parts(name)) != 1 or not isinstance(value, dict):
                         raise ValueError('path')
                     path = prefix + name
                     if 'files' in value:
@@ -100,20 +129,10 @@ def archive_info(archive, unpacked, verify=False, view=None):
             for name, value in entries(tree):
                 if not verify and name != 'package.json':
                     continue
-                if value.get('unpacked'):
-                    path = unpacked.joinpath(*name.split('/'))
-                    content = view.read_bytes(path) if view else path.read_bytes()
-                else:
-                    stream.seek(base + int(value['offset']))
-                    content = stream.read(value['size'])
-                if len(content) != value['size']:
-                    raise ValueError('size')
-                integrity = value.get('integrity')
-                if integrity and (integrity.get('algorithm') != 'SHA256' or sha(content) != integrity['hash']):
-                    raise PatchError('官方归档或其解包依赖的完整性校验失败：' + name)
+                content = _archive_content(stream, base, value, name, unpacked, view)
                 if name == 'package.json':
                     package = json.loads(content)
-            if not package or package.get('name') != '@deepseek-ai/dsh-desktop':
+            if not isinstance(package, dict) or package.get('name') != '@deepseek-ai/dsh-desktop':
                 raise ValueError('not official desktop archive')
             return {'version': package['version'], 'commit': package.get('dshBuildCommit', '')}
     except PatchError:
@@ -127,113 +146,143 @@ def archive_file(archive, name, unpacked, view=None):
     try:
         with (view.open(archive) if view else archive.open('rb')) as stream:
             header = struct.unpack('<4I', stream.read(16))
-            if header[0] != 4 or not 0 < header[3] < 32 * 1024 * 1024:
+            if (header[0] != 4 or not 0 < header[3] < 32 * 1024 * 1024
+                    or header[1] < header[3] + 8):
                 raise ValueError('header')
             node = json.loads(stream.read(header[3]))
-            for part in name.split('/'):
-                if part in ('', '.', '..'):
-                    raise ValueError('path')
+            for part in _archive_parts(name):
+                if not isinstance(node, dict) or not isinstance(node.get('files'), dict):
+                    raise ValueError('directory')
                 node = node['files'][part]
-            if node.get('unpacked'):
-                path = unpacked.joinpath(*name.split('/'))
-                content = view.read_bytes(path) if view else path.read_bytes()
-            else:
-                stream.seek(8 + header[1] + int(node['offset']))
-                content = stream.read(node['size'])
-            integrity = node.get('integrity')
-            if len(content) != node['size'] or (integrity and
-                    (integrity.get('algorithm') != 'SHA256' or sha(content) != integrity['hash'])):
-                raise ValueError('integrity')
-            return content
+            if not isinstance(node, dict):
+                raise ValueError('file')
+            return _archive_content(stream, 8 + header[1], node, name, unpacked, view)
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
-        raise PatchError('无法验证 Harness 提供的依赖：' + name) from exc
+        raise PatchError('无法验证 Harness 提供的依赖：' + str(name)) from exc
 
 
 class PatchModes:
-    def __init__(self, manager):
-        self.manager = manager
-        self.home = manager.home
-        self.resources = Path(manager.settings['executable']).resolve().parent / 'resources'
-        key = sha((str(self.resources).lower() + '|' + str(self.home).lower()).encode())[:16]
-        self.root = manager.data / 'patches' / key
+    def __init__(self, context, require_stopped):
+        self.context = context
+        self.require_stopped = require_stopped
+        self.adapter = PURGE
+        self.versions = None
+        self.home = context.home
+        self.resources = context.resources
+        self.root = context.patch_root
+        self.store = ContentStore(self.root)
         self.record = self.root / 'state.json'
         self.app = self.resources / 'app'
         self.archive = self.resources / 'app.asar'
-        self.stash = self.resources / ('.harness-launcher-' + key)
-        self.home_stash = self.home / ('.harness-launcher-' + key)
+        self.stash = self.resources / ('.harness-launcher-' + context.identity)
+        self.home_stash = self.home / ('.harness-launcher-' + context.identity)
+        self.archive_source = HostArchive(self.resources, self.stash)
+
+    def bind_versions(self, versions):
+        if self.versions is not None and self.versions is not versions:
+            raise RuntimeError('Adapter version service is already bound')
+        self.versions = versions
+
+    def _versions(self):
+        if self.versions is None:
+            raise RuntimeError('Adapter version service must be bound before planning')
+        return self.versions
+
+    def extra_roots(self):
+        return self.adapter.extra_roots(self.home, self.resources, self.stash, self.home_stash)
 
     def official_archive(self, view=None):
         # Capture and switching must agree when plugin mode has parked the ASAR.
-        candidates = (self.archive, self.stash / 'official.asar', self.resources / 'app.asar.bak')
-        return next((path for path in candidates if (view.is_file(path) if view else path.is_file())), None)
+        return self.archive_source.official_archive(view)
 
     def load(self):
         if not self.record.is_file():
             return None
         try:
             state = json.loads(self.record.read_text(encoding='utf-8'))
-            if state.get('format') != 2 or not state.get('package') or not state.get('revision') or state.get('pending'):
-                raise ValueError()
-            if state['resources'] != str(self.resources) or state['home'] != str(self.home):
-                raise ValueError()
+            self.validate_state(state)
             return state
-        except (OSError, ValueError, KeyError):
-            raise PatchError('补丁记录需要迁移或已损坏，请先运行 migrate.py 并保留 patches 目录。')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise PatchError('补丁记录格式或内容无效，请保留记录并使用离线迁移工具检查。') from exc
+
+    def validate_state(self, state):
+        if (not isinstance(state, dict) or type(state.get('format')) is not int
+                or state['format'] != 3 or state.get('pending')
+                or state.get('requiredFeatures', []) != []):
+            raise ValueError('Unsupported adapter record')
+        if state.get('resources') != str(self.resources) or state.get('home') != str(self.home):
+            raise ValueError('Adapter installation mismatch')
+        if state.get('mode') not in ('captured', 'native', 'plugin') or not isinstance(state.get('pluginVersion'), str):
+            raise ValueError('Invalid adapter state')
+        object_reference(state.get('package'), 'packages')
+        object_reference(state.get('revision'), 'revisions')
+        digest(state.get('archiveHash'))
+        digest(state.get('treeContentHash'))
+        if not isinstance(state.get('files'), list) or not isinstance(state.get('directories'), list):
+            raise ValueError('Invalid adapter operations')
+        seen = set()
+        for item in state['files']:
+            path = self.safe(Path(item['path']))
+            if path in seen:
+                raise ValueError('Duplicate adapter file')
+            seen.add(path)
+            for key in ('initial', 'native', 'plugin'):
+                if item[key] is not None:
+                    digest(item[key])
+        for item in state['directories']:
+            active, parked = self.safe(Path(item['active'])), self.safe(Path(item['parked']))
+            if active in seen or parked in seen or active == parked:
+                raise ValueError('Duplicate adapter directory')
+            seen.update((active, parked))
+            digest(item.get('contentHash'))
+        return state
 
     def save(self, state):
+        try:
+            self.validate_state(state)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PatchError('拒绝保存无效的补丁状态。') from exc
         put(self.record, (json.dumps(state, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
 
     def blob(self, content):
-        if content is None:
-            return None
-        key = sha(content)
-        path = self.root / 'blobs' / key
-        if not path.exists():
-            put(path, content)
-        return key
+        return self.store.put_blob(content) if content is not None else None
 
     def bytes(self, key):
-        if key is None:
-            return None
-        if not re.fullmatch('[a-f0-9]{64}', key):
-            raise PatchError('补丁快照编号无效。')
-        try:
-            content = (self.root / 'blobs' / key).read_bytes()
-        except OSError as exc:
-            raise PatchError('内置补丁快照缺失或无法读取，未覆盖应用。') from exc
-        if sha(content) != key:
-            raise PatchError('补丁快照校验失败，未覆盖应用。')
-        return content
+        return self.store.blob_bytes(key) if key is not None else None
 
     def summary(self, plugins):
         try:
             state = self.load()
-            known = any(p['id'] == 'dsh-purge' for p in plugins)
-            unknown = [p['id'] for p in plugins if p['id'] != 'dsh-purge']
-            return {'supported': known or state is not None, 'mode': state['mode'] if state else 'unmanaged',
+            known = any(p['id'] == self.adapter.plugin for p in plugins)
+            unknown = [p['id'] for p in plugins if p['id'] != self.adapter.plugin]
+            return {'plugin': self.adapter.plugin, 'supported': known or state is not None, 'mode': state['mode'] if state else 'unmanaged',
                     'verifiedNative': bool(state and state['mode'] == 'native'
                                            and self.archive.is_file() and not self.app.exists() and not unknown),
                     'pending': False, 'unknown': unknown,
-                    'managed': ['dsh-purge'] if known or state else [],
+                    'managed': [self.adapter.plugin] if known or state else [],
                     'archiveAvailable': self.official_archive() is not None, 'error': ''}
         except PatchError as exc:
-            return {'supported': True, 'mode': 'error', 'verifiedNative': False, 'pending': False,
+            return {'plugin': self.adapter.plugin, 'supported': True, 'mode': 'error', 'verifiedNative': False, 'pending': False,
                     'unknown': [], 'managed': [], 'archiveAvailable': False, 'error': str(exc)}
 
     def safe(self, path):
         """Every mutation stays inside this exact installation/profile."""
         path = Path(path)
+        if not path.is_absolute() or '..' in path.parts:
+            raise PatchError('拒绝非规范的补丁路径：' + str(path))
         allowed = (self.resources.resolve(), self.home.resolve())
         resolved = path.resolve()
         if not any(resolved.is_relative_to(root) and resolved != root for root in allowed):
             raise PatchError('拒绝操作安装/数据目录以外的文件：' + str(path))
-        if path.is_symlink() or path.is_junction():
-            raise PatchError('拒绝覆盖链接：' + str(path))
-        targets = {self.app, self.archive, self.resources / 'app.asar.bak',
-                   self.stash / 'app', self.stash / 'official.asar',
-                   self.home / 'prompt-inject.md', self.home / 'AGENTS.md', self.home / 'CLAUDE.md',
-                   self.home / '.agent-presets' / 'redteam', self.home_stash / 'redteam',
-                   self.resources / 'runtime' / 'cli' / 'bin' / 'dsh.cmd', self.manager.manifest_path}
+        cursor = path
+        while cursor not in allowed:
+            if cursor.is_symlink() or cursor.is_junction():
+                raise PatchError('拒绝覆盖链接或其目标：' + str(cursor))
+            if cursor == cursor.parent:
+                raise PatchError('补丁路径不属于此安装：' + str(path))
+            cursor = cursor.parent
+        targets = self.adapter.mutation_targets(self.home, self.resources, self.stash, self.home_stash)
+        targets.add(self.context.manifest_path)
         if path not in targets:
             raise PatchError('文件不属于已适配的补丁目标：' + str(path))
         return path
@@ -252,7 +301,7 @@ class PatchModes:
 
     def replay(self, operations, undo=False):
         for op in reversed(operations) if undo else operations:
-            self.manager.require_stopped()
+            self.require_stopped()
             if op['kind'] == 'file':
                 path = self.safe(Path(op['path']))
                 before, after = (op['after'], op['before']) if undo else (op['before'], op['after'])
@@ -282,10 +331,10 @@ class PatchModes:
                 raise PatchError('未知的补丁日志操作。')
 
     def capture(self, plugins, view=None, persist=True):
-        purge = next((p for p in plugins if p['id'] == 'dsh-purge' and p['available']), None)
+        purge = next((p for p in plugins if p['id'] == self.adapter.plugin and p['available']), None)
         if not purge:
             raise PatchError('找不到 dsh-purge，无法建立可逆补丁快照。')
-        if any(p['enabled'] and p['id'] != 'dsh-purge' for p in plugins):
+        if any(p['enabled'] and p['id'] != self.adapter.plugin for p in plugins):
             raise PatchError('首次建立补丁快照时存在其他已启用插件，无法确认目录归属。请先完成这些插件的还原适配。')
         archive = self.official_archive(view)
         if archive is None:
@@ -307,21 +356,21 @@ class PatchModes:
             rule_path = self.home / 'rules' / (active + '.md')
             if view.is_file(rule_path) if view else rule_path.is_file():
                 active_rule = view.read_bytes(rule_path) if view else rule_path.read_bytes()
-        for name in ['prompt-inject.md', 'AGENTS.md', 'CLAUDE.md']:
+        for name in self.adapter.rule_files:
             path = self.home / name
             if not (view.is_file(path) if view else path.is_file()):
                 continue
             content = view.read_bytes(path) if view else path.read_bytes()
-            backup = path.with_name(path.name + '.dsh-purge-rule.bak')
-            owned = (name == 'prompt-inject.md' or (view.is_file(backup) if view else backup.is_file()) or content == active_rule
-                     or b'Little Code Sauce' in content or b'UNRESTRICTED SANDBOX' in content)
+            backup = self.adapter.rule_backup(path)
+            owned = self.adapter.owns_rule(name, content,
+                has_backup=view.is_file(backup) if view else backup.is_file(), active_rule=active_rule)
             if owned:
                 original = (view.read_bytes(backup) if view else backup.read_bytes()) if (view.is_file(backup) if view else backup.is_file()) else None
                 files.append({'path': str(path), 'initial': self.blob(content),
                               'plugin': self.blob(content), 'native': self.blob(original)})
         # Desktop CLI repair is outside resources/app; preserve both versions.
-        cli = self.resources / 'runtime' / 'cli' / 'bin' / 'dsh.cmd'
-        backup = cli.with_name(cli.name + '.dsh-purge.bak')
+        cli = self.adapter.cli_path(self.resources)
+        backup = self.adapter.cli_backup(self.resources)
         if view.is_file(cli) if view else cli.is_file():
             initial_cli = view.read_bytes(cli) if view else cli.read_bytes()
             original_cli = (view.read_bytes(backup) if view else backup.read_bytes()) if (view.is_file(backup) if view else backup.is_file()) else initial_cli
@@ -331,29 +380,49 @@ class PatchModes:
             patched_cli = initial_cli.replace(b'\\app.asar\\', b'\\app\\')
             files.append({'path': str(cli), 'initial': self.blob(initial_cli),
                           'plugin': self.blob(patched_cli), 'native': self.blob(original_cli)})
-        preset = self.home / '.agent-presets' / 'redteam'
+        preset = self.home / '.agent-presets' / self.adapter.preset
         directories = []
         if view.is_dir(preset) if view else preset.is_dir():
-            directories.append({'active': str(preset), 'parked': str(self.home_stash / 'redteam'),
-                                'hash': tree_hash(preset, view)})
-        state = {'format': 2, 'resources': str(self.resources), 'home': str(self.home),
+            directories.append({'active': str(preset), 'parked': str(self.home_stash / self.adapter.preset),
+                                'hash': tree_hash(preset, view), 'contentHash': tree_hash(preset, view, content=True)})
+        state = {'format': 3, 'resources': str(self.resources), 'home': str(self.home),
                  'mode': 'captured', 'pluginVersion': purge['version'], 'archiveHash': (view.hash(archive) if view else file_hash(archive)),
                  'archiveInfo': info, 'initialArchive': str(archive), 'treeHash': tree_hash(self.app, view),
+                 'treeContentHash': tree_hash(self.app, view, content=True),
                  'files': files, 'directories': directories}
-        state = self.manager.tracking.versions.bind_adapter(state)
+        state = self._versions().bind_adapter(state, self.adapter.plugin)
         if persist:
             self.save(state)
         return state
 
+    def verify_files(self, state, view=None):
+        """Verify both live and parked adapter files without creating objects."""
+        official = self.official_archive(view)
+        if official is None or (view.hash(official) if view else file_hash(official)) != state['archiveHash']:
+            raise PatchError('Harness 官方归档已更新或被修改，已停止使用旧补丁快照。')
+        app_at = self.app if (view.exists(self.app) if view else self.app.exists()) else self.stash / 'app'
+        if tree_hash(app_at, view, content=True) != state['treeContentHash']:
+            raise PatchError('补丁目录有新改动或其他插件写入，已停止切换以保护这些修改。')
+        for item in state['files']:
+            actual = (view.hash(Path(item['path'])) if view else file_hash(Path(item['path'])))
+            expected = item['native'] if state['mode'] == 'native' else item['initial'] if state['mode'] == 'captured' else item['plugin']
+            if actual != expected:
+                raise PatchError('插件注入文件已被修改，需重新建立快照：' + item['path'])
+        for item in state['directories']:
+            at = Path(item['parked'] if state['mode'] == 'native' else item['active'])
+            if tree_hash(at, view, content=True) != item['contentHash']:
+                raise PatchError('插件预设已被修改，未覆盖现有预设。')
+        return official
+
     def prepare(self, selection, plugins, before, after, strict_native=False, view=None):
         state = self.load()
-        purge = next((p for p in plugins if p['id'] == 'dsh-purge'), None)
-        unknown = [p['id'] for p in plugins if p['id'] != 'dsh-purge']
+        purge = next((p for p in plugins if p['id'] == self.adapter.plugin), None)
+        unknown = [p['id'] for p in plugins if p['id'] != self.adapter.plugin]
         if strict_native and unknown:
             raise PatchError('这些插件尚未接入补丁还原，无法保证原生模式：' + '、'.join(unknown))
         if strict_native:
             for filename in ['cordis.yml', 'cordis.patch.yml']:
-                path = self.manager.profile / filename
+                path = self.context.profile / filename
                 if not (view.is_file(path) if view else path.is_file()):
                     continue
                 source = '\n'.join(line for line in (view.read_bytes(path).decode('utf-8-sig') if view else path.read_text(encoding='utf-8-sig')).splitlines()
@@ -367,26 +436,12 @@ class PatchModes:
             return None
         if not state:
             state = self.capture(plugins, view=view, persist=False)
-        self.manager.tracking.versions.verify_adapter(state)
-        desired = 'plugin' if 'dsh-purge' in selection else 'native'
+        self._versions().verify_adapter(state, self.adapter.plugin)
+        desired = 'plugin' if self.adapter.plugin in selection else 'native'
         if purge and purge['version'] != state['pluginVersion']:
             raise PatchError('dsh-purge 已升级，旧补丁快照已停用。需在新版本上重新建立快照。')
-        official = self.official_archive(view)
-        if official is None or (view.hash(official) if view else file_hash(official)) != state['archiveHash']:
-            raise PatchError('Harness 官方归档已更新或被修改，已停止使用旧补丁快照。')
+        official = self.verify_files(state, view)
         operations = []
-        app_at = self.app if (view.exists(self.app) if view else self.app.exists()) else self.stash / 'app'
-        if tree_hash(app_at, view) != state['treeHash']:
-            raise PatchError('补丁目录有新改动或其他插件写入，已停止切换以保护这些修改。')
-        for item in state['files']:
-            actual = (view.hash(Path(item['path'])) if view else file_hash(Path(item['path'])))
-            expected = item['native'] if state['mode'] == 'native' else item.get('initial', item['plugin']) if state['mode'] == 'captured' else item['plugin']
-            if actual != expected:
-                raise PatchError('插件注入文件已被修改，需重新建立快照：' + item['path'])
-        for item in state['directories']:
-            at = Path(item['parked'] if state['mode'] == 'native' else item['active'])
-            if tree_hash(at, view) != item['hash']:
-                raise PatchError('插件预设已被修改，未覆盖现有预设。')
         if desired == 'native':
             if (view.exists(self.app) if view else self.app.exists()):
                 operations.append(self.move_op(self.app, self.stash / 'app', view))
@@ -406,7 +461,7 @@ class PatchModes:
                 operations.append(self.move_op(source, dest, view))
             elif not (view.exists(dest) if view else dest.exists()):
                 raise PatchError('插件预设目录缺失。')
-        manifest = self.manager.manifest_path
+        manifest = self.context.manifest_path
         if (view.read_bytes(manifest) if view else manifest.read_bytes()) != before:
             raise PatchError('配置在校验期间被更改，请刷新后重试。')
         if before != after:

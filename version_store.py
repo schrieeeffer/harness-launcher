@@ -11,16 +11,19 @@ import re
 import stat
 import time
 
-from patch_modes import PatchError, archive_file, file_hash, put, sha
+from patch_modes import PatchError, archive_file, file_hash, sha
+from domain import ContentIdentity, DomainError
 
 
 NAME = re.compile(r'^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$')
 
 
 class VersionStore:
-    def __init__(self, tracker):
-        self.tracker = tracker
-        self.profile = tracker.manager.profile
+    def __init__(self, profile, executable, content_store, host_archive):
+        self.profile = Path(profile)
+        self.executable = Path(executable)
+        self.store = content_store
+        self.host_archive = host_archive
         self.view = None
 
     @contextmanager
@@ -33,21 +36,14 @@ class VersionStore:
             self.view = previous
 
     def object(self, kind, value):
-        content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
-        relative = kind + '/' + sha(content) + '.json'
-        path = self.tracker.root / relative
-        if path.exists() and path.read_bytes() != content:
-            raise PatchError('版本记录校验失败，请保留原始记录：' + relative)
-        if not path.exists():
-            put(path, content)
-        return relative
+        return self.store.object(kind, value)
 
     def files(self, root, store=True):
         """Capture installed code, not user data; reject ambiguous nested links."""
         result = {}
         def visit(directory):
             for child in sorted(directory.iterdir()):
-                if child.name == 'node_modules' and child.is_dir():
+                if directory == root and child.name == 'node_modules' and child.is_dir():
                     continue  # Dependency edges are captured explicitly below.
                 info = child.lstat()
                 if getattr(info, 'st_file_attributes', 0) & 0x400 or stat.S_ISLNK(info.st_mode):
@@ -58,7 +54,7 @@ class VersionStore:
                     visit(child)
                 elif stat.S_ISREG(info.st_mode):
                     stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-                    digest = self.tracker.store_file(child, stamp) if store else file_hash(child)
+                    digest = self.store.store_file(child, stamp) if store else file_hash(child)
                     now = child.stat()
                     if [now.st_size, now.st_mtime_ns, now.st_ctime_ns] != stamp:
                         raise PatchError('插件代码仍在变化，版本记录未保存：' + str(child))
@@ -70,15 +66,22 @@ class VersionStore:
         return result
 
     def resolve_dependency(self, root, name):
-        if not NAME.fullmatch(name):
+        if not isinstance(name, str) or not NAME.fullmatch(name):
             raise PatchError('插件依赖名称无效：' + str(name))
         # Node resolves dependencies from the real package directory upwards.
         for directory in (root, *root.parents):
             if directory.name == 'node_modules':
                 continue
             candidate = directory / 'node_modules' / name
+            # CommonJS resolves files before package directories. A loose
+            # module can shadow a valid package at this or a higher level;
+            # recording that other package would verify the wrong runtime code.
+            if any(Path(str(candidate) + suffix).is_file() for suffix in ('', '.js', '.json', '.node')):
+                raise PatchError('插件依赖被无清单模块遮蔽，无法保存完整版本：' + str(candidate))
             if (candidate / 'package.json').is_file():
                 return candidate.resolve()
+            if any((candidate / ('index' + suffix)).is_file() for suffix in ('.js', '.json', '.node')):
+                raise PatchError('插件依赖缺少 package.json，无法保存完整版本：' + str(candidate))
         return None
 
     def capture(self, name, source='', store=True, metadata=True):
@@ -89,6 +92,8 @@ class VersionStore:
         while queue:
             path = queue.pop(0)
             meta = json.loads((path / 'package.json').read_bytes())
+            if not isinstance(meta, dict):
+                raise PatchError('插件依赖清单必须是对象：' + str(path))
             package_id = ids[path]
             dependencies = {}
             required = meta.get('dependencies', {})
@@ -106,7 +111,7 @@ class VersionStore:
                             dependencies[dep] = provided
                             continue
                     optional_peer = meta.get('peerDependenciesMeta', {}).get(dep, {}).get('optional')
-                    if dep in optional or (dep in peers and optional_peer):
+                    if dep in optional or (dep in peers and dep not in required and optional_peer):
                         dependencies[dep] = {'missing': True, 'optional': True}
                         continue
                     raise PatchError('插件依赖缺失，不能保存完整版本：' + dep)
@@ -134,11 +139,11 @@ class VersionStore:
                 if path.is_file():
                     info = path.stat()
                     stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-                    result['installMetadata'][name] = self.tracker.store_file(path, stamp) if store else file_hash(path)
+                    result['installMetadata'][name] = self.store.store_file(path, stamp) if store else file_hash(path)
         return result
 
     def host_dependency(self, name):
-        core = self.tracker.core
+        core = self.host_archive
         archive = core.official_archive(self.view)
         if archive is None:
             return None
@@ -151,25 +156,25 @@ class VersionStore:
         if meta.get('name') != name:
             raise PatchError('Harness 依赖名称不匹配：' + name)
         return {'providedBy': 'harness', 'name': name, 'version': meta['version'], 'manifestHash': sha(content),
-                'hostHash': file_hash(Path(self.tracker.manager.settings['executable'])),
+                'hostHash': file_hash(self.executable),
                 'archiveHash': self.view.hash(archive) if self.view else file_hash(archive)}
 
     @staticmethod
     def adapter_patch(state):
         return {key: value for key, value in state.items() if key not in ('mode', 'package', 'revision')}
 
-    def bind_adapter(self, state, source='installed:dsh-purge'):
-        package = self.package_snapshot('dsh-purge', source)
-        revision = self.object('revisions', {'format': 1, 'plugin': 'dsh-purge', 'adapter': 'dsh-purge',
+    def bind_adapter(self, state, adapter, source=None):
+        package = self.package_snapshot(adapter, source or 'installed:' + adapter)
+        revision = self.object('revisions', {'format': 1, 'plugin': adapter, 'adapter': adapter,
             'version': state['pluginVersion'], 'package': package, 'patch': self.adapter_patch(state)})
         return dict(state, package=package, revision=revision)
 
-    def verify_adapter(self, state):
-        revision = self.tracker.read_object(state['revision'])
-        if (revision.get('adapter') != 'dsh-purge' or revision['package'] != state['package']
+    def verify_adapter(self, state, adapter):
+        revision = self.store.read_object(state['revision'])
+        if (revision.get('adapter') != adapter or revision['package'] != state['package']
                 or revision['patch'] != self.adapter_patch(state)):
             raise PatchError('内置补丁记录与不可变版本不一致。')
-        self.verify_package('dsh-purge', state['package'])
+        self.verify_package(adapter, state['package'])
 
     def package_snapshot(self, name, source=''):
         capsule = self.capture(name, source)
@@ -180,38 +185,38 @@ class VersionStore:
         for package in capsule['packages'].values():
             for entry in package['files'].values():
                 if entry['type'] == 'file':
-                    self.tracker.blob_bytes(entry['hash'])
+                    self.store.blob_bytes(entry['hash'])
         return self.object('packages', capsule)
 
     def verify_package(self, name, reference):
-        expected = self.tracker.read_object(reference)
+        expected = self.store.read_object(reference)
         actual = self.capture(name, expected.get('source', ''), store=False, metadata=False)
         if actual != {k: v for k, v in expected.items() if k != 'installMetadata'}:
             raise PatchError('插件或依赖内容与版本记录不同，请通过启动器重新记录升级：' + name)
         for package in expected['packages'].values():
             for entry in package['files'].values():
                 if entry['type'] == 'file':
-                    self.tracker.blob_bytes(entry['hash'])
+                    self.store.blob_bytes(entry['hash'])
         for digest in expected.get('installMetadata', {}).values():
-            self.tracker.blob_bytes(digest)
+            self.store.blob_bytes(digest)
 
     def verify_record(self, name, record):
-        revision = self.tracker.read_object(record['revision'])
+        revision = self.store.read_object(record['revision'])
         defaults = {'baseVersions': {}, 'source': ''}
         for key in ('version', 'delta', 'package', 'hostHash', 'baseSelection', 'baseVersions', 'baseline', 'after', 'source', 'manifestBefore'):
             if revision.get(key) != record.get(key, defaults.get(key)):
                 raise PatchError('插件索引与不可变版本记录不一致：' + name)
         if revision.get('plugin') != name:
             raise PatchError('插件版本记录名称不匹配：' + name)
-        self.tracker.read_object(record['delta'])
-        if revision['deltaHash'] != sha((self.tracker.root / record['delta']).read_bytes()):
+        self.store.read_object(record['delta'])
+        if revision['deltaHash'] != Path(record['delta']).stem:
             raise PatchError('插件文件差异记录已损坏：' + name)
 
     def revision(self, name, record, package=None, source='', parent=None, origin='installation'):
-        self.tracker.read_object(record['delta'])
+        self.store.read_object(record['delta'])
         value = {'format': 1, 'plugin': name, 'version': record['version'], 'source': source,
                  'package': package, 'delta': record['delta'], 'parent': parent,
-                 'deltaHash': sha((self.tracker.root / record['delta']).read_bytes()),
+                 'deltaHash': Path(record['delta']).stem,
                  'baseline': record.get('baseline'), 'after': record.get('after'),
                  'manifestBefore': record.get('manifestBefore'),
                  'baseSelection': record['baseSelection'], 'baseVersions': record.get('baseVersions', {}),
@@ -231,5 +236,7 @@ class VersionStore:
 
     @staticmethod
     def content_state(snapshot):
-        return {key: {k: entry[k] for k in ('type', 'hash', 'target') if k in entry}
-                for key, entry in sorted(snapshot.items())}
+        try:
+            return {key: ContentIdentity.decode(entry).to_dict() for key, entry in sorted(snapshot.items())}
+        except DomainError as exc:
+            raise PatchError('组合文件内容身份无效：' + str(exc)) from exc

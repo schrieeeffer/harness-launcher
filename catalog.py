@@ -51,6 +51,16 @@ def safe_url(value):
         return ''
 
 
+def search_response(value, items_key, total_key):
+    """Reject broken provider envelopes; individual malformed entries can be skipped."""
+    if not isinstance(value, dict) or not isinstance(value.get(items_key), list):
+        raise CatalogError('数据源返回的搜索结果格式无效，请稍后重试。')
+    total = value.get(total_key, 0)
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise CatalogError('数据源返回的结果总数无效，请稍后重试。')
+    return value[items_key], total
+
+
 class Catalog:
     def __init__(self):
         self.cache = {}
@@ -128,7 +138,7 @@ class Catalog:
             if not results and len(errors) == len(providers):
                 raise CatalogError('；'.join(errors))
             results.sort(key=lambda r: (r['kind'] != 'official', r['provider'] == 'github', -r.get('stars', 0), r['name']))
-            return {'items': results, 'hasMore': more, 'page': page, 'warning': '；'.join(errors),
+            return {'items': results, 'hasMore': more and page < 20, 'page': page, 'warning': '；'.join(errors),
                     'query': query, 'source': source}
         return self.cached(key, task)
 
@@ -148,15 +158,21 @@ class Catalog:
             params = {'q': 'topic:dsh-plugin archived:false ' + terms, 'per_page': size,
                       'page': page + 1, 'sort': 'stars', 'order': 'desc'}
             value = self.fetch('https://api.github.com/search/repositories?' + urlencode(params))
+            repositories, total = search_response(value, 'items', 'total_count')
             items = []
-            for repo in value.get('items', []):
-                name = repo.get('full_name', '')
-                if not REPOSITORY.fullmatch(name):
+            for repo in repositories:
+                if not isinstance(repo, dict):
                     continue
+                name = repo.get('full_name', '')
+                if not isinstance(name, str) or not REPOSITORY.fullmatch(name):
+                    continue
+                stars = repo.get('stargazers_count', 0)
+                if not isinstance(stars, int) or isinstance(stars, bool) or stars < 0:
+                    stars = 0
                 items.append({'name': name, 'description': str(repo.get('description') or '')[:1000],
                               'provider': 'github', 'kind': 'community', 'version': '',
-                              'url': 'https://github.com/' + name, 'stars': repo.get('stargazers_count', 0)})
-            return items, (page + 1) * size < min(value.get('total_count', 0), 378)
+                              'url': 'https://github.com/' + name, 'stars': stars})
+            return items, (page + 1) * size < min(total, 378)
         qualifiers = 'scope:deepseek-ai' if source == 'official' else ECOSYSTEM_KEYWORDS
         # A bare package query also finds packages missing ecosystem keywords.
         text = query if PACKAGE.fullmatch(query) and ('dsh' in query or 'harness' in query) and source == 'community' else qualifiers + ' ' + query
@@ -164,8 +180,11 @@ class Catalog:
             # npmmirror's upstream search does not implement npm keyword/scope qualifiers.
             text = ('@deepseek-ai/dsh ' if source == 'official' else 'dsh ') + query
         value = self.fetch(REGISTRIES[registry] + '/-/v1/search?' + urlencode({'text': text, 'size': size, 'from': page * size}))
+        packages, total = search_response(value, 'objects', 'total')
         items = []
-        for row in value.get('objects', []):
+        for row in packages:
+            if not isinstance(row, dict) or not isinstance(row.get('package'), dict):
+                continue
             package = row.get('package', {})
             name = package.get('name', '')
             if not isinstance(name, str) or not PACKAGE.fullmatch(name):
@@ -177,7 +196,7 @@ class Catalog:
                           'description': str(package.get('description', ''))[:1000],
                           'provider': 'npm', 'kind': 'official' if official else 'community',
                           'url': 'https://www.npmjs.com/package/' + quote(name, safe='@/'), 'stars': 0})
-        return items, (page + 1) * size < value.get('total', 0)
+        return items, (page + 1) * size < total
 
     def leaderboard(self, board='downloads'):
         """Rank by npm's own 7-day download counts. The mirror reports its own totals, so it is never used."""
@@ -202,13 +221,15 @@ class Catalog:
             for job in jobs:
                 try:
                     value = job.result()
+                    packages, page_total = search_response(value, 'objects', 'total')
                 except CatalogError:
                     failed += 1
                     continue
-                if isinstance(value.get('total'), int):
-                    total = max(total, value['total'])
-                for row in value.get('objects', []):
+                total = max(total, page_total)
+                for row in packages:
                     seen += 1
+                    if not isinstance(row, dict) or not isinstance(row.get('package'), dict):
+                        continue
                     package, downloads = row.get('package', {}), row.get('downloads')
                     name = package.get('name', '')
                     if not isinstance(name, str) or not PACKAGE.fullmatch(name) or name in rows or not isinstance(downloads, dict):
@@ -244,9 +265,14 @@ class Catalog:
             value = self.fetch(url)
             if provider == 'github':
                 try:
+                    if not isinstance(value, dict):
+                        raise ValueError()
                     if value.get('encoding') != 'base64' or value.get('size', 0) > 256 * 1024:
                         raise ValueError()
-                    meta = json.loads(base64.b64decode(value['content'], validate=False))
+                    raw = base64.b64decode(value['content'], validate=False)
+                    if len(raw) > 256 * 1024:
+                        raise ValueError()
+                    meta = json.loads(raw)
                 except (ValueError, KeyError, TypeError) as exc:
                     raise CatalogError('仓库根目录没有可读取的 package.json，请查看仓库说明并手动添加。') from exc
             else:
@@ -260,12 +286,15 @@ class Catalog:
             if provider == 'npm' and package != name:
                 raise CatalogError('包名与查询不一致。')
             dsh = meta.get('dsh', {})
-            bundle = isinstance(dsh, dict) and isinstance(dsh.get('bundle'), dict) and isinstance(dsh['bundle'].get('patch'), str)
+            bundle = (isinstance(dsh, dict) and isinstance(dsh.get('bundle'), dict)
+                      and isinstance(dsh['bundle'].get('patch'), str) and bool(dsh['bundle']['patch'].strip()))
             repository = meta.get('repository', {})
             repository = repository.get('url', '') if isinstance(repository, dict) else repository
             peer = meta.get('peerDependencies', {})
             peer = peer if isinstance(peer, dict) else {}
             installable = bundle and (provider == 'github' or bool(VERSION.fullmatch(version)))
+            notice = ('' if installable else '包元数据中没有有效的版本，暂时无法锁定安装来源。' if bundle
+                      else '这是组件库或仓库未在根目录声明有效的 dsh.bundle.patch，不能作为独立插件直接安装。')
             return {'name': package, 'version': version[:100], 'provider': provider,
                     'kind': 'official' if provider == 'npm' and package.startswith('@deepseek-ai/') else 'community',
                     'description': str(meta.get('description', ''))[:3000],
@@ -275,5 +304,5 @@ class Catalog:
                     'compatibility': {k: str(v)[:100] for k, v in peer.items() if k.startswith('@deepseek-ai/')},
                     'installable': installable, 'bundle': bundle,
                     'source': ('git+https://github.com/' + name + '.git') if provider == 'github' else package + '@' + version,
-                    'notice': '' if installable else '这是组件库或仓库未在根目录声明 dsh.bundle.patch，不能作为独立插件直接安装。'}
+                    'notice': notice}
         return self.cached(('detail', provider, name, registry), task)

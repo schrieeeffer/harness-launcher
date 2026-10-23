@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
-import re
 import stat
 import subprocess
 import threading
@@ -19,7 +18,13 @@ import time
 import uuid
 from urllib.parse import urlparse
 
+from adapters import is_adapter
+from domain import (ContentIdentity, DomainError, ManagedPath, PLUGIN_NAME,
+                    SnapshotEntry, validate_snapshot, validate_changes)
+from recording_state import RecordingEvent, RecordingPhase, RecordingSession, RunState, validate_registry
 from patch_modes import PatchError, PatchModes, file_hash, put, sha
+from runtime_context import RuntimeContext
+from storage import ContentStore, write_json
 from version_store import VersionStore
 
 
@@ -27,13 +32,10 @@ class TrackingError(PatchError):
     pass
 
 
-PLUGIN_NAME = re.compile(r'^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$')
-
-
 class PluginTracking:
     def __init__(self, manager):
         self.manager = manager
-        self.core = PatchModes(manager)
+        self.core = PatchModes(RuntimeContext.from_manager(manager), require_stopped=manager.require_stopped)
         self.root = self.core.root / 'tracking'
         self.index = self.root / 'registry.json'
         self.busy = False
@@ -42,7 +44,9 @@ class PluginTracking:
         self._owned_session = None
         self._process = None
         self._quiet = None
-        self.versions = VersionStore(self)
+        self.store = ContentStore(self.root)
+        self.versions = VersionStore(manager.profile, Path(manager.settings['executable']), self.store, self.core.archive_source)
+        self.core.bind_versions(self.versions)
         resources = self.core.resources
         home = manager.home
         self.scopes = {
@@ -57,103 +61,61 @@ class PluginTracking:
 
     def load(self):
         if any((self.manager.data / name).exists() for name in ('import-pending.json', 'migration-pending.json')):
-            raise TrackingError('数据迁移尚未结束，请退出启动器后运行 migrate.py --apply。')
+            raise TrackingError('数据导入尚未结束，请退出启动器并完成离线导入。')
         if not self.index.is_file():
-            return {'format': 2, 'records': {}, 'order': [], 'session': None}
+            return {'format': 3, 'requiredFeatures': [], 'records': {}, 'order': [], 'session': None}
         try:
             value = json.loads(self.index.read_text(encoding='utf-8'))
-            if value['format'] != 2 or not isinstance(value['records'], dict):
-                raise ValueError()
-            if (any(not PLUGIN_NAME.fullmatch(name) for name in value['records'])
-                    or not isinstance(value['order'], list)
-                    or len(value['order']) != len(set(value['order']))
-                    or set(value['order']) != set(value['records'])):
-                raise ValueError()
-            if value.get('pending') or value.get('inSwitch'):
-                raise ValueError()
-            if any(not r.get('revision') or not r.get('package') for r in value['records'].values()):
-                raise ValueError()
-            return value
+            return validate_registry(value)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise TrackingError('记录需要迁移或已损坏。请先运行 migrate.py，保留 tracking 目录。') from exc
+            raise TrackingError('记录格式不是当前版本或已损坏，请保留 tracking 目录并检查离线导入结果。') from exc
 
     def save(self, value):
-        if value.get('format') != 2:
-            raise TrackingError('只支持新版记录，请先运行 migrate.py。')
-        put(self.index, (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
+        try:
+            validate_registry(value)
+        except DomainError as exc:
+            raise TrackingError('拒绝保存无效记录：' + str(exc)) from exc
+        write_json(self.index, value)
 
     def read_object(self, relative):
-        if not isinstance(relative, str) or not re.fullmatch(r'(?:snapshots|deltas|packages|revisions|combinations|baselines|transactions)/[a-f0-9]{64}\.json', relative):
-            raise TrackingError('记录文件编号无效。')
+        value = self.store.read_object(relative)
         try:
-            content = (self.root / relative).read_bytes()
-        except OSError as exc:
-            raise TrackingError('记录文件缺失或无法读取，已停止覆盖：' + relative) from exc
-        if sha(content) != Path(relative).stem:
-            raise TrackingError('版本或组合记录校验失败，已停止覆盖。')
-        try:
-            return json.loads(content)
-        except ValueError as exc:
-            raise TrackingError('记录内容损坏，已停止覆盖：' + relative) from exc
+            if relative.startswith('snapshots/'):
+                validate_snapshot(value)
+            elif relative.startswith('deltas/'):
+                validate_changes(value)
+        except DomainError as exc:
+            raise TrackingError('记录内容结构无效：' + relative + '；' + str(exc)) from exc
+        return value
 
     def object(self, kind, value):
         if kind not in ('snapshots', 'deltas'):
             raise TrackingError('不支持的文件记录类型。')
-        return self.versions.object(kind, value)
+        try:
+            (validate_snapshot if kind == 'snapshots' else validate_changes)(value)
+        except DomainError as exc:
+            raise TrackingError('不能保存无效文件记录：' + str(exc)) from exc
+        return self.store.object(kind, value)
 
     def blob_bytes(self, key):
-        if not re.fullmatch('[a-f0-9]{64}', key or ''):
-            raise TrackingError('文件快照编号无效。')
-        path = self.root / 'blobs' / key
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            raise TrackingError('文件快照缺失或无法读取，已停止覆盖：' + key) from exc
-        if sha(data) != key:
-            raise TrackingError('文件快照校验失败，已停止覆盖。')
-        return data
+        return self.store.blob_bytes(key)
 
     def store_file(self, path, stamp, cached=None):
-        if cached and cached.get('stamp') == stamp and (self.root / 'blobs' / cached['hash']).is_file():
-            return cached['hash']
-        blobs = self.root / 'blobs'
-        blobs.mkdir(parents=True, exist_ok=True)
-        temp = blobs / (uuid.uuid4().hex + '.tmp')
-        h = hashlib.sha256()
-        try:
-            with path.open('rb') as source, temp.open('wb') as target:
-                for block in iter(lambda: source.read(1024 * 1024), b''):
-                    h.update(block)
-                    target.write(block)
-                target.flush()
-                os.fsync(target.fileno())
-            now = path.stat()
-            if [now.st_size, now.st_mtime_ns, now.st_ctime_ns] != stamp:
-                raise TrackingError('快照期间文件仍在变化，请退出相关程序后重试：' + str(path))
-            key = h.hexdigest()
-            destination = blobs / key
-            if not destination.exists():
-                os.replace(temp, destination)
-            return key
-        finally:
-            temp.unlink(missing_ok=True)
+        return self.store.store_file(path, stamp, cached)
 
     def target(self, key):
         try:
-            scope, relative = key.split('|', 1)
-            base = self.scopes[scope]
+            managed = ManagedPath.decode(key)
+            relative = managed.relative
+            base = self.scopes[managed.scope]
             parts = PurePosixPath(relative)
             if parts.is_absolute() or '..' in parts.parts or '\\' in relative or ':' in relative:
                 raise ValueError()
             path = base if relative == '.' else base.joinpath(*parts.parts)
             # Physical files only: never follow a plugin-created junction to disk outside scope.
-            cursor = path
-            while cursor != base.parent:
+            for cursor in (path, *path.parents):
                 if cursor.is_symlink() or cursor.is_junction():
                     raise TrackingError('不能自动覆盖链接或其目标：' + str(cursor))
-                if cursor == cursor.parent:
-                    raise ValueError()
-                cursor = cursor.parent
             if not path.resolve().is_relative_to(base.parent.resolve()):
                 raise ValueError()
             return path
@@ -164,13 +126,27 @@ class PluginTracking:
     def equal(left, right):
         if left is None or right is None:
             return left is right
-        if left['type'] != right['type']:
-            return False
-        if left['type'] == 'file':
-            return left['hash'] == right['hash']
-        if left['type'] == 'link':
-            return left['target'] == right['target']
-        return True
+        try:
+            return ContentIdentity.decode(left) == ContentIdentity.decode(right)
+        except DomainError as exc:
+            raise TrackingError('无法比较无效文件身份：' + str(exc)) from exc
+
+    @staticmethod
+    def _transition(session, event, **data):
+        try:
+            updated = RecordingSession.decode(session).transition(event, **data).to_dict()
+        except DomainError as exc:
+            raise TrackingError('安装状态转换被拒绝：' + str(exc)) from exc
+        session.clear()
+        session.update(updated)
+
+    @staticmethod
+    def _check_scope_parents(path):
+        # The scope itself may be recorded as a link, but its parents must not
+        # redirect enumeration into an unrelated directory.
+        for parent in path.parents:
+            if parent.is_symlink() or parent.is_junction():
+                raise TrackingError('托管目录的上级路径不能是链接：' + str(parent))
 
     def snapshot(self, cached=None):
         cached = cached or {}
@@ -191,14 +167,15 @@ class PluginTracking:
             elif stat.S_ISREG(info.st_mode):
                 stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
                 key_hash = self.store_file(path, stamp, cached.get(key))
-                result[key] = {'type': 'file', 'hash': key_hash, 'size': info.st_size,
-                               'mtime': info.st_mtime_ns, 'stamp': stamp}
+                result[key] = SnapshotEntry.decode({'type': 'file', 'hash': key_hash, 'size': info.st_size,
+                                                    'mtime': info.st_mtime_ns, 'stamp': stamp}).to_dict()
                 self.progress = {'count': self.progress['count'] + 1,
                                  'bytes': self.progress['bytes'] + info.st_size, 'path': key}
             else:
                 raise TrackingError('遇到不支持的文件类型：' + str(path))
 
         for scope, path in self.scopes.items():
+            self._check_scope_parents(path)
             if path.exists() or path.is_symlink():
                 capture(path, scope + '|.')
         return result
@@ -231,6 +208,7 @@ class PluginTracking:
             else:
                 result[key] = ['file', info.st_size, info.st_mtime_ns]
         for scope, path in self.scopes.items():
+            self._check_scope_parents(path)
             if path.exists() or path.is_symlink():
                 visit(path, scope + '|.')
         return result
@@ -285,9 +263,33 @@ class PluginTracking:
                 put(path, content)
                 os.utime(path, ns=(b['mtime'], b['mtime']))
 
+    def recorded_state(self, value, inventory=None):
+        """Return trusted current contents, never a snapshot of today's files."""
+        if value.get('currentCombination'):
+            return self.read_object(value['currentCombination'])['state']
+        if not value.get('inventory') or not value['order']:
+            return None
+        if inventory is None:
+            inventory = self.read_object(value['inventory'])
+        latest = value['records'][value['order'][-1]]
+        if latest.get('after'):
+            snapshot = self.read_object(latest['after'])
+            expected = {key: ['file', item['size'], item['mtime']] if item['type'] == 'file'
+                        else ['link', item['target']] if item['type'] == 'link' else ['dir']
+                        for key, item in snapshot.items()}
+            if expected == inventory:
+                return snapshot
+        return None
+
     def guard(self, check_files=False):
         from switch_plan import SwitchPlan
         SwitchPlan(self).recover()
+        self.verify_idle(check_files=check_files)
+
+    def verify_idle(self, check_files=False):
+        """Read-only inspection; never recover a transaction as a side effect."""
+        if (self.root / 'switch.json').exists():
+            raise TrackingError('组合切换尚未完成，请通过正常启动器操作恢复；只读检查不会修改文件。')
         value = self.load()
         if self.busy or value.get('session'):
             raise TrackingError('安装记录尚未完成，请等待自动保存；如有异常，请先处理，原始快照会保留。')
@@ -295,6 +297,23 @@ class PluginTracking:
             expected = self.read_object(value['inventory'])
             actual = self.metadata()
             changed = [key for key in set(expected) | set(actual) if expected.get(key) != actual.get(key)]
+            if changed:
+                # Harness can rewrite generated cordis.yml without changing its
+                # bytes. Metadata is a fast filter, not evidence of a new patch.
+                # Only the current combination (or the matching last recording)
+                # may supply the expected content; never adopt today's files.
+                recorded = self.recorded_state(value, expected) or {}
+                from file_view import FileView
+                conflicts = []
+                for key in changed:
+                    before, after, content = expected.get(key), actual.get(key), recorded.get(key)
+                    if (before and after and before[0] == after[0] == 'file'
+                            and before[1] == after[1] and content and content['type'] == 'file'):
+                        path = self.target(key)
+                        if self.equal(FileView([path]).entry(path), content):
+                            continue
+                    conflicts.append(key)
+                changed = conflicts
             if changed:
                 raise TrackingError('记录窗口外发生了文件变化，无法自动归属，已停止覆盖：' + '、'.join(sorted(changed)[:4]))
 
@@ -358,7 +377,7 @@ class PluginTracking:
                 with self.manager.lock:
                     value = self.load()
                     if value.get('session'):
-                        value['session']['error'] = str(exc)
+                        self._transition(value['session'], RecordingEvent.FAIL, error=str(exc) or type(exc).__name__)
                         self.save(value)
             finally:
                 self.busy = False
@@ -369,9 +388,10 @@ class PluginTracking:
             self.manager.require_stopped()
             self.manager.require_executable()
             self.guard(check_files=True)
-            if not isinstance(name, str) or not PLUGIN_NAME.fullmatch(name) or name == 'dsh-purge':
-                raise TrackingError('请输入有效的新插件包名。dsh-purge 使用已有的内置还原机制。')
-            if not isinstance(source, str) or len(source) > 2048 or source.startswith('-') or '\n' in source or '\r' in source:
+            if not isinstance(name, str) or not PLUGIN_NAME.fullmatch(name) or is_adapter(name):
+                raise TrackingError('请输入有效的新插件包名。内置适配插件使用专用还原机制。')
+            if (not isinstance(source, str) or len(source) > 2048 or source.startswith('-')
+                    or any(char in source for char in ('\n', '\r', '\x00'))):
                 raise TrackingError('安装来源格式无效。')
             if urlparse(source).username or urlparse(source).password:
                 raise TrackingError('安装地址不能包含账号密码，请使用已配置的包管理器认证。')
@@ -381,7 +401,7 @@ class PluginTracking:
                 raise TrackingError('上次组合切换尚未完成，请先应用当前组合以完成恢复，再开始记录。')
             raw, obj, bundles = self.manager.manifest()
             existing = self.manager.discover(obj, bundles)
-            unknown = [p['id'] for p in existing if p['id'] not in value['records'] and p['id'] != 'dsh-purge']
+            unknown = [p['id'] for p in existing if p['id'] not in value['records'] and not is_adapter(p['id'])]
             if unknown:
                 raise TrackingError('已存在没有安装前记录的插件，不能把未知改动当作原始文件：' + '、'.join(unknown))
             if name in value['records']:
@@ -393,15 +413,13 @@ class PluginTracking:
             plugins = self.manager.discover(obj, bundles)
             if name not in value['records'] and any(p['id'] == name for p in plugins):
                 raise TrackingError('此插件已安装且没有安装前记录，无法补回已经发生的改动。请在安装新插件之前开始记录。')
-            value['session'] = {'id': uuid.uuid4().hex, 'plugin': name, 'source': source,
-                                'phase': 'preparing', 'started': time.time(), 'error': '',
-                                'baseSelection': [p for p in bundles if p not in ('@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app')],
-                                'versions': {p['id']: p['version'] for p in plugins}, 'baseline': None,
-                                'baseVersions': {p: value['records'][p].get('revision') for p in value['order']
-                                                 if p in bundles and p != name},
-                                'automatic': True, 'observedRunning': False, 'runClosed': False,
-                                'hostHash': file_hash(Path(self.manager.settings['executable'])),
-                                'initialInventory': self.object('snapshots', self.metadata())}
+            value['session'] = RecordingSession(
+                id=uuid.uuid4().hex, plugin=name, source=source, phase=RecordingPhase.PREPARING,
+                started=time.time(), host_hash=file_hash(Path(self.manager.settings['executable'])),
+                base_selection=tuple(p for p in bundles if p not in ('@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app')),
+                versions={p['id']: p['version'] for p in plugins},
+                base_versions={p: value['records'][p]['revision'] for p in value['order'] if p in bundles and p != name},
+                initial_inventory=self.object('snapshots', self.metadata())).validate().to_dict()
             self._owned_session = value['session']['id']
             self._quiet = None
             value['completed'] = None
@@ -415,26 +433,25 @@ class PluginTracking:
         value = self.load()
         session = value['session']
         if not session.get('baseline'):
-            if not session.get('initialInventory'):
-                raise TrackingError('旧版记录缺少完整原始快照，不能把现在的文件补记为原始状态。请保留快照并恢复干净安装。')
             if self.metadata() != self.read_object(session['initialInventory']):
                 raise TrackingError('备份完成前文件已经改变，不能把现状当作原始文件。请恢复原状后重试。')
             baseline = self.snapshot()
+            recorded = self.recorded_state(value)
+            if recorded is not None and self.differences(recorded, baseline):
+                raise TrackingError('记录窗口外的文件内容发生变化，不能作为新安装的原始状态。请恢复原状后重试。')
             self.manager.require_stopped()
             if self.metadata() != self.read_object(session['initialInventory']):
                 raise TrackingError('备份期间文件发生改动，尚未开始安装，请恢复原状后重试。')
-            session['baseline'] = self.object('snapshots', baseline)
-            session['manifestBefore'] = self.versions.object('baselines',
-                {'manifest': self.manager.manifest_path.read_bytes().decode('utf-8-sig'),
-                 'bom': self.manager.manifest_path.read_bytes().startswith(b'\xef\xbb\xbf')})
-            session['phase'] = 'installing' if session['source'] else 'recording'
+            manifest = self.manager.manifest_path.read_bytes()
+            self._transition(session, RecordingEvent.BASELINE_READY, baseline=self.object('snapshots', baseline),
+                             manifest_before=self.versions.object('baselines',
+                                 {'manifest': manifest.decode('utf-8-sig'), 'bom': manifest.startswith(b'\xef\xbb\xbf')}))
             self.save(value)
         if session['source'] and not session.get('installed'):
-            session['phase'] = 'installing'
+            self._transition(session, RecordingEvent.INSTALL)
             self.save(value)
             self.install(session['plugin'], session['source'], session['id'])
-            session['installed'] = True
-        session['phase'] = 'recording'
+            self._transition(session, RecordingEvent.INSTALLED)
         self.save(value)
         self._launch()
 
@@ -488,7 +505,7 @@ class PluginTracking:
                 self.manager.backup(raw, bundles, '首次运行时启用插件并自动记录')
                 put(self.manager.manifest_path, (json.dumps(obj, ensure_ascii=False, indent=2) + '\n').encode())
             # Persist the intent before spawning; a crash can never silently skip first-run recording.
-            session.update(launchAt=time.time(), observedRunning=False, runClosed=False, error='')
+            self._transition(session, RecordingEvent.LAUNCH, launch_at=time.time())
             self.save(value)
             self._owned_session = session['id']
             self._quiet = None
@@ -511,7 +528,7 @@ class PluginTracking:
             except Exception as exc:
                 value = self.load()
                 if value.get('session'):
-                    value['session']['error'] = str(exc)
+                    self._transition(value['session'], RecordingEvent.FAIL, error=str(exc) or type(exc).__name__)
                     self.save(value)
 
     def _tick(self, now=None):
@@ -523,7 +540,8 @@ class PluginTracking:
             if not session or session.get('error'):
                 return
             if session['id'] != self._owned_session:
-                session['error'] = '上次安装记录意外中断，原始快照已保留。检查后点击「继续自动记录」，不会直接采用中断期间的改动。'
+                self._transition(session, RecordingEvent.FAIL,
+                                 error='上次安装记录意外中断，原始快照已保留。检查后点击「继续自动记录」，不会直接采用中断期间的改动。')
                 self.save(value)
                 return
             if session['phase'] != 'recording':
@@ -531,17 +549,19 @@ class PluginTracking:
             now = time.time() if now is None else now
             if self.manager.is_running():
                 self._quiet = None
-                if not session.get('observedRunning'):
+                if session['runState'] != RunState.RUNNING:
                     if self._process is None or self._process.poll() is not None:
-                        session['error'] = '检测到了其他或转交后的 Harness 进程，但无法确认本次启动。原始记录已保留，请检查后继续。'
+                        self._transition(session, RecordingEvent.FAIL,
+                                         error='检测到了其他或转交后的 Harness 进程，但无法确认本次启动。原始记录已保留，请检查后继续。')
                         self.save(value)
                         return
-                    session['observedRunning'] = True
+                    self._transition(session, RecordingEvent.OBSERVE_RUNNING)
                     self.save(value)
                 return
-            if not session.get('observedRunning'):
-                if now - session.get('launchAt', now) >= 30:
-                    session['error'] = '未检测到 Harness 正常启动，记录尚未保存。请检查应用后继续自动记录。'
+            if session['runState'] in (RunState.IDLE, RunState.LAUNCHING):
+                if session.get('launchAt') is not None and now - session['launchAt'] >= 30:
+                    self._transition(session, RecordingEvent.FAIL,
+                                     error='未检测到 Harness 正常启动，记录尚未保存。请检查应用后继续自动记录。')
                     self.save(value)
                 return
             # The Electron bootstrap may exit before its desktop/tray child. Require
@@ -552,13 +572,13 @@ class PluginTracking:
                 return
             if now - self._quiet[0] < 2:
                 return
-            session['runClosed'] = True
+            self._transition(session, RecordingEvent.OBSERVE_CLOSED)
             self.save(value)
             try:
                 self.finish()
             except Exception as exc:
                 value = self.load()
-                value['session']['error'] = str(exc)
+                self._transition(value['session'], RecordingEvent.FAIL, error=str(exc) or type(exc).__name__)
                 self.save(value)
 
     def retry(self):
@@ -568,21 +588,16 @@ class PluginTracking:
             session = value.get('session')
             if self.busy or not session or not session.get('error'):
                 raise TrackingError('当前没有需要继续的异常安装记录。')
-            if not session.get('hostHash'):
-                raise TrackingError('安装记录缺少程序标识，请先完成数据迁移。')
             self._owned_session = session['id']
-            session['automatic'] = True
-            session['error'] = ''
+            self._transition(session, RecordingEvent.RETRY)
             self.save(value)
-            if session.get('runClosed') and session['phase'] in ('scanning', 'verifying'):
+            if session['runState'] == RunState.CLOSED:
                 try:
                     return self.finish()
                 except Exception as exc:
-                    session['error'] = str(exc)
+                    self._transition(session, RecordingEvent.FAIL, error=str(exc) or type(exc).__name__)
                     self.save(value)
                     raise
-            session['phase'] = 'recording' if session.get('baseline') else 'preparing'
-            self.save(value)
             self._job(self._prepare_install)
             return {'message': '已继续自动记录，原始快照保持不变。'}
 
@@ -622,11 +637,10 @@ class PluginTracking:
             session = value.get('session')
             if not session or not session.get('baseline'):
                 raise TrackingError('尚无完整的安装前快照。')
-            if not session.get('observedRunning') or not session.get('runClosed'):
+            if session['runState'] != RunState.CLOSED:
                 raise TrackingError('首次运行尚未完成，正常使用并完全退出 Harness 后会自动保存。')
             versions = self._validate_session(session)
-            session['phase'] = 'scanning'
-            session['error'] = ''
+            self._transition(session, RecordingEvent.SCAN)
             self.save(value)
 
             def task():
@@ -637,9 +651,9 @@ class PluginTracking:
                 # Fail before registering a layer if any link/type transition cannot be replayed.
                 self.operations(changes)
                 saved = self.load()
-                saved['session'].update(phase='verifying', version=versions[session['plugin']], count=len(changes),
-                                        after=self.object('snapshots', after),
-                                        delta=self.object('deltas', {'changes': changes}))
+                self._transition(saved['session'], RecordingEvent.VERIFY,
+                                 version=versions[session['plugin']], count=len(changes),
+                                 after=self.object('snapshots', after), delta=self.object('deltas', {'changes': changes}))
                 self.save(saved)
                 self._save_record()
             self._job(task)
@@ -649,7 +663,7 @@ class PluginTracking:
         with self.manager.lock:
             value = self.load()
             session = value.get('session')
-            if not session or session['phase'] != 'verifying' or not session.get('runClosed'):
+            if not session or session['phase'] != 'verifying' or session['runState'] != RunState.CLOSED:
                 raise TrackingError('尚未完成自动整理校验，不能跳过安装记录。')
             versions = self._validate_session(session)
             expected_versions = dict(session['versions'])
@@ -699,7 +713,7 @@ class PluginTracking:
                                       'count': session['count'], 'enabled': True,
                                       'baseSelection': session['baseSelection'], 'history': history,
                                       'hostHash': session['hostHash'], 'source': session.get('source', ''),
-                                      'baseline': session['baseline'], 'after': session['after'],
+                                      'baseline': session['baseline'], 'after': self.object('snapshots', verified),
                                       'baseVersions': session.get('baseVersions', {}),
                                       'manifestBefore': session.get('manifestBefore'), 'package': package}
             record = value['records'][name]
@@ -723,18 +737,38 @@ class PluginTracking:
             session = value.get('session')
             if not session:
                 raise TrackingError('没有进行中的安装。')
-            _, obj, bundles = self.manager.manifest()
+            raw, obj, bundles = self.manager.manifest()
             versions = {p['id']: p['version'] for p in self.manager.discover(obj, bundles)}
             if versions != session['versions']:
                 raise TrackingError('插件安装已经发生，必须保留记录。请处理异常后继续自动记录。')
+            # A reinstall may replace code without changing package.json's
+            # version. Keep its recovery session until the package is restored.
+            for name, record in value['records'].items():
+                if name == session['plugin'] or name in session['baseSelection']:
+                    self.versions.verify_package(name, record['package'])
+            restore_manifest = None
             if session.get('baseline'):
                 changed = self.differences(self.read_object(session['baseline']), self.snapshot())
+                baseline = self.versions.store.read_object(session['manifestBefore'])
+                original = json.loads(baseline['manifest'])
+                expected = copy.deepcopy(original)
+                selected = expected['dsh']['profile']['bundles']
+                if session['plugin'] in versions and session['plugin'] not in selected:
+                    selected.append(session['plugin'])
+                if obj != original and obj != expected:
+                    raise TrackingError('安装期间配置已经改变，不能丢弃记录。请恢复安装前的配置后重试。')
+                if obj != original:
+                    restore_manifest = (b'\xef\xbb\xbf' if baseline.get('bom') else b'') + baseline['manifest'].encode('utf-8')
             else:
-                if not session.get('initialInventory'):
-                    raise TrackingError('旧记录没有完整原始快照，不能确认文件未改动，已保留记录。')
                 changed = self.metadata() != self.read_object(session['initialInventory'])
             if changed:
                 raise TrackingError('文件已经改动，不能丢弃还原记录。请处理异常后继续自动记录。')
+            if restore_manifest is not None:
+                if self.manager.manifest_path.read_bytes() != raw:
+                    raise TrackingError('取消期间配置再次改变，已保留安装记录。')
+                # Undo only the launcher's own first-run enablement. The old
+                # revision was disabled before taking the upgrade baseline.
+                put(self.manager.manifest_path, restore_manifest)
             value['session'] = None
             self.save(value)
             return {'message': '已取消尚未发生文件改动的安装。'}

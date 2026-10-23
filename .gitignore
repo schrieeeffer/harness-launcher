@@ -11,6 +11,7 @@ preview*.png
 .DS_Store
 Thumbs.db
 instance.json
+instance.lock
 settings.json
 patches/
 backups/

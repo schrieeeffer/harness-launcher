@@ -12,7 +12,7 @@
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.2.1%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.3.0%20preview-orange.svg)
 
 **简体中文** · [English](README.en.md)
 
@@ -25,6 +25,7 @@
 
 ## 目录
 
+- [新版完整功能演示与验证截图](docs/feature-tour.md)
 - [为什么需要它](#为什么需要它)
 - [功能一览](#功能一览)
 - [快速开始](#快速开始)
@@ -77,20 +78,20 @@ Harness Launcher 用一个本机网页界面解决这些问题：启动前按需
 
 ## 快速开始
 
-### 升级到 0.2.1
+### 升级到 0.3.0
 
-0.2.1 统一使用新版记录格式，移除了旧索引、旧切换日志和旧手动确认接口的运行分支。使用过旧版时，先在旧版完成未结束的安装 / 恢复，然后完全退出 Harness 和启动器后台服务，在项目目录运行：
+0.3.0 将设置、插件登记表、适配状态、切换日志和配置备份统一为格式 3，运行时只读取新格式。升级已有完整 v2 记录时，先在旧版完成未结束的安装及恢复，然后完全退出 Harness 和启动器后台服务，在项目目录运行：
 
 ```powershell
 python migrate.py
 python migrate.py --apply
 ```
 
-第一条准备并校验迁移，第二条替换元数据。工具保留插件实际版本、启用选择和应用文件，把原始索引、设置与配置备份打包保存在启动器数据目录的 `migrations/` 中；缺失的历史安装包不会补造。旧配置备份会绑定迁移时的已安装版本，不能把它当作过去版本的一键降级。工具发现未完成记录、未知文件改动或缺少原始快照时会停止。
+第一条在独立暂存目录预检，退出时清理该临时目录。第二条重新转换并核验对象、文件副本和组合后切换目录。插件实际版本、启用选择和 Harness 应用文件保持原状；完整旧数据目录改名为同级的 `<数据目录>.archive-<时间>-<编号>`，附带校验清单，仅用于离线恢复。新版运行时不会读取归档；缺失或损坏的历史、未完成记录及未知文件变化会阻止迁移。
 
-新版默认使用 `%USERPROFILE%\.harness-launcher`，避免 Windows 商店应用的 AppData 虚拟化造成同一路径读到不同记录。首次迁移会自动从旧的 `%LOCALAPPDATA%\HarnessLauncher` 归并数据，原目录保留；若导入中断，重新运行 `python migrate.py --apply` 即可继续。自定义旧目录可用 `python migrate.py --source <旧目录> --data <新的空目录> --apply`。只保留新版运行逻辑，旧目录用于存档。
+默认数据目录仍为 `%USERPROFILE%\.harness-launcher`。自定义目录使用 `python migrate.py --data <数据目录> --apply`；不再自动搜寻或合并旧 AppData。若目录切换中断并留下同级的 `.upgrade.json`，先运行 `python migrate.py --recover`（自定义目录加 `--data`）。更早的格式及旧导入中断应先在对应旧版完成处理。
 
-新安装启动器且没有旧数据时无需迁移。日常升级不会自动更新插件包，也不需要维护两套启动器。
+新安装无需迁移。未来增加功能会尽量采用兼容的可选字段与明确的能力声明；必要语义变化仍可能需要离线迁移，不能保证永不迁移。实现边界及数据演进规则见 [架构说明](docs/architecture.md)。
 
 ### 环境要求
 
@@ -120,7 +121,7 @@ python migrate.py --apply
 3. 之后可以直接双击 **`launch.vbs`**，它会隐藏控制台窗口启动。它优先使用 Harness 自带的 `pythonw.exe`（根据已保存的应用路径或 `DSH_EXECUTABLE` 定位），其次使用 `PATH` 中的 `pythonw.exe`。可以为 `launch.vbs` 创建桌面快捷方式。
 
 > [!TIP]
-> 重复双击 `launch.vbs` 会复用已有服务。关闭菜单后，安装和首次运行记录仍在后台继续；自动保存完成后才恢复约 5 分钟的空闲退出。异常会保留到下次打开处理。
+> 重复双击 `launch.vbs` 会复用已有服务。关闭菜单后，后台仍会运行并完成安装和首次运行记录；网页挂起或电脑休眠不会触发自动退出。需要彻底退出时，使用「设置与说明 → 退出启动器后台」。正在安装、记录或切换时会阻止退出，异常记录会保留。
 
 ### 首次配置
 
@@ -155,7 +156,11 @@ python migrate.py --apply
 - **已安装插件列表**：本机 desktop profile 中所有可识别的插件 bundle。
 - **本次启动面板**：汇总这次将加载的插件、待应用的改动，以及启动和应用按钮。
 
-页面右上角的状态标签每 4 秒刷新一次：**Harness 未运行**（绿色）、**Harness 运行中**（琥珀色，此时禁止切换），以及 **菜单服务已断开**（红色，后台服务已退出，重新双击 `launch.vbs` 即可）。
+页面右上角约每 4 秒检查状态，回到页面时会立即检查：**Harness 未运行**（绿色）、**Harness 运行中**（琥珀色，此时禁止切换）。如果无法连接后台，会出现红色提示和 **重新连接** 按钮；仍无法连接时，请重新双击桌面快捷方式或 `launch.vbs`，使用新打开的菜单。后台重启后，旧页面的凭据会失效，需要使用新窗口。
+
+断线期间勾选不会自动应用，也不会重新启用启动按钮。恢复连接后会重新读取实际配置并保留本页勾选，不会自动重试启动或切换请求。配置或记录读取错误会单独显示具体原因，不再一律提示后台断开。
+
+<img src="docs/images/connection-recovery.png" alt="断线提示、重新连接入口以及保持禁用的启动按钮，使用合成示例数据" width="100%">
 
 <table>
   <tr>
@@ -380,7 +385,9 @@ npm 详情会锁定查询到的版本（例如 `@demo/dsh-desk-pet@0.3.7`）。G
 
 ### 设置与说明
 
-<img src="docs/images/settings.png" alt="设置与说明：路径、方案与文件、使用说明" width="640">
+<img src="docs/images/settings.png" alt="设置与说明：路径、方案与文件、启动器后台、使用说明" width="640">
+
+「退出启动器后台」会断开所有菜单窗口，已启动的 Harness 会继续运行。安装记录或文件切换仍在进行时会拒绝退出；已暂停的异常记录保留在磁盘。只想暂时关掉窗口时，关闭窗口即可，下次打开会复用后台。
 
 - **路径**：Harness 应用路径与数据目录。点击 **自动检测** 会读取安装程序在注册表中登记的位置。保存时会检查程序文件名是否为 `DeepSeek Harness.exe`，以及数据目录中是否有 `profiles\desktop\package.json`。**更换数据目录会清空方案列表**，如需保留，请先导出方案。
 - **方案与文件**：导出 / 导入方案，以及打开启动器程序目录。
@@ -476,9 +483,10 @@ flowchart TD
 | `%USERPROFILE%\.harness-launcher\patches\` | 补丁快照、安装记录、安装器日志和差异清单。 |
 | `%USERPROFILE%\.harness-launcher\launcher.log` | 警告与错误日志，不包含访问令牌。 |
 | `%USERPROFILE%\.harness-launcher\instance.json` | 当前服务的本机地址（含访问令牌），用于重复启动时复用服务。 |
+| `%USERPROFILE%\.harness-launcher\instance.lock` | 后台运行期间持有的系统锁，防止同一数据目录出现多个写入实例；退出后文件保留，不代表服务仍在运行。 |
 | `<安装目录>\resources\.harness-launcher-*`<br>`<数据目录>\.harness-launcher-*` | 当前没有启用的官方文件或插件文件的暂存目录。 |
 
-使用 `--data <目录>` 时，前五项会改存到指定目录。快照可能包含你放在规则、技能或配置文件中的私人内容，请妥善保管这些目录。
+使用 `--data <目录>` 时，前六项会改存到指定目录。快照可能包含你放在规则、技能或配置文件中的私人内容，请妥善保管这些目录。
 
 ### 网络访问
 
@@ -565,7 +573,7 @@ Harness 升级会替换官方文件。启动器检测到版本或文件变化后
 <details>
 <summary><b>关闭窗口后，后台服务还在运行吗？</b></summary>
 
-关闭菜单后，安装和首次运行记录继续进行。记录完成且菜单已空闲约 5 分钟时，服务才自动退出；如果完成时已超过空闲时限，可能很快退出。异常记录会保存在磁盘，下次打开处理。再次双击 `launch.vbs` 会复用仍在运行的服务。
+会。关闭菜单后，后台继续运行，安装和首次运行记录继续进行。服务不会根据网页心跳缺失自动退出，因此浏览器挂起或电脑休眠后仍可继续使用。需要结束后台时，在「设置与说明」点击「退出启动器后台」；它会检查是否有安装、记录或切换进行。异常记录保存在磁盘，下次打开处理。再次双击 `launch.vbs` 会复用仍在运行的服务。
 
 </details>
 
@@ -579,14 +587,18 @@ Harness 升级会替换官方文件。启动器检测到版本或文件变化后
 ## 卸载
 
 1. 打开启动器，选择你希望最终保留的状态（例如原生模式，或常用的插件组合），然后点击「应用选择」。
-2. 删除启动器所在的文件夹和桌面快捷方式。**删除启动器本身不会回滚任何 Harness 文件。**
+2. 在「设置与说明」退出启动器后台，再删除启动器所在的文件夹和桌面快捷方式。**删除启动器本身不会回滚任何 Harness 文件。**
 3. `%USERPROFILE%\.harness-launcher` 中保存着设置、备份和补丁快照；`resources\.harness-launcher-*` 和数据目录中的 `.harness-launcher-*` 保存着当前没有启用的版本。删除这些目录后，就再也不能切换回那些版本了，请确认不再需要后再删除。
 
 ## 开发与贡献
 
 ```powershell
 python -m unittest discover -v   # Python 3.12+
-node --check ui/app.js           # Node.js 22+，仅用于语法检查
+node --check ui/api.js
+node --check ui/state.js
+node --check ui/runtime.js
+node --check ui/app.js           # Node.js 22+，语法检查
+node --test test_ui.cjs          # 隔离的连接、断线恢复与按钮状态测试
 ```
 
 - 测试使用临时 profile、合成的 ASAR 和模拟的远程响应，**不会**安装真实插件，也不会修改真实的 Harness 配置。
@@ -595,18 +607,20 @@ node --check ui/app.js           # Node.js 22+，仅用于语法检查
 
 | 路径 | 说明 |
 | --- | --- |
-| `launcher.py` | 本机 HTTP 服务、配置读写、切换与回滚、程序路径检测。 |
-| `patch_modes.py` | dsh-purge 内置适配器与官方归档校验。 |
+| `launcher.py`、`operations.py`、`errors.py` | HTTP 与应用编排、有界操作状态、错误代码及恢复建议。 |
+| `domain.py`、`recording_state.py`、`operation_models.py` | 文件身份、快照元信息、安装状态机与事务命令的严格解码。 |
+| `storage.py`、`settings_store.py`、`runtime_context.py` | 原子内容存储、设置契约与不可变路径上下文。 |
+| `patch_modes.py`、`adapters.py` | 内置适配规则、官方归档校验与操作规划。 |
 | `plugin_tracking.py` | 强制安装记录：自动备份、首次运行监督、校验保存与新版记录索引。 |
 | `version_store.py` | 按内容去重的插件安装内容、依赖图、不可变版本及组合记录。 |
 | `file_view.py`、`switch_plan.py` | 只读文件视图、整套预检、统一切换事务及中断恢复。 |
-| `migrate.py` | 独立的一次性迁移工具；保存旧元数据存档，转换后运行时只使用新版格式。 |
+| `migrate.py` | 独立 v2 → v3 转换；暂存核验、目录切换、完整旧目录离线归档。 |
 | `catalog.py` | 插件目录：npm / GitHub 搜索、详情与排行榜（只访问固定的公开接口）。 |
-| `ui/` | 界面：`index.html`、`style.css`、`app.js`，无需构建。 |
+| `ui/` | `api.js` 传输、`state.js` 状态、`runtime.js` 异步调度、`app.js` 渲染；无需构建。 |
 | `launch.vbs`、`bootstrap.ps1` | 隐藏控制台启动。 |
 | `docs/` | 技术说明与截图。 |
 
-贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+接手项目、备份恢复及 AI 交接请阅读 [维护说明](MAINTENANCE.md)。贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证与声明
 

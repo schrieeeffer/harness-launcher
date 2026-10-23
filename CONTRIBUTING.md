@@ -6,13 +6,19 @@
 
 ### 开发环境
 
-使用 Python 3.12+ 和 Node.js 22+（Node 只用于 JavaScript 语法检查）。项目没有任何 pip 或 npm 依赖。
+项目目录、启动命令、离线备份恢复和 AI 交接提示词见 [维护说明](MAINTENANCE.md)。
+
+使用 Python 3.12+ 和 Node.js 22+（Node 用于 JavaScript 语法检查和界面逻辑测试）。项目没有任何 pip 或 npm 依赖。
 
 提交前请运行：
 
 ```powershell
 python -m unittest discover -v
+node --check ui/api.js
+node --check ui/state.js
+node --check ui/runtime.js
 node --check ui/app.js
+node --test test_ui.cjs
 ```
 
 测试使用临时目录、合成数据和模拟的公开接口，**绝不能**安装真实插件或修改真实的 Harness 配置。
@@ -23,6 +29,9 @@ node --check ui/app.js
 - 插件目录只能访问固定的公开 registry 和 GitHub 接口，不能请求用户提供的任意地址。
 - 用户明确开始安装后，记录必须始终开启。备份、首次运行监督、文件稳定性和双向恢复数据校验、保存均自动完成；异常才要求处理，不允许丢弃已经发生改动的记录。
 - 文件组合必须先只读预检，再用统一事务执行；运行时只读取新版，旧数据转换集中到独立迁移工具并存档，插件版本、依赖图及组合记录按内容哈希保存，不覆盖历史记录。新增恢复行为应使用隔离夹具验证失败与中断。
+- 遵守 [架构与数据契约](docs/architecture.md)。领域模块不能依赖 Manager、HTTP 或磁盘；通过显式构造参数注入基础设施依赖。文件身份与采样元信息分离，会话状态必须通过 `RecordingSession.transition` 修改，事务必须先解码全部命令。
+- 当前控制数据只接受格式 3；迁移工具只转换完整 v2，先核验独立 stage 再切换目录。可选字段保持原语义；必要的新语义声明 `requiredFeatures`，旧程序遇到未知能力必须拒绝。不可变对象的既有契约不能因控制数据升级而随意改写。
+- 界面通过状态 reducer 改状态，异步请求带有过期检查；不要直接变更服务端快照或自动重试写操作。错误分支使用 `code`，不依赖中文文案。
 - 界面在严格的内容安全策略下运行：不要使用内联脚本、内联 `style` 属性或外部 CDN 资源。修改 `ui/index.html` 时，保留 `ui/app.js` 使用的元素 id。
 - 改动界面后，请同时检查宽窗口、1120 px 以下和 760 px 以下的布局。
 
@@ -46,13 +55,19 @@ node --check ui/app.js
 
 ### Development setup
 
-Use Python 3.12+ and Node.js 22+ (Node is only used for the JavaScript syntax check). There are no pip or npm dependencies.
+See the [maintenance guide](MAINTENANCE.en.md) for project layout, startup commands, offline backup/restoration and an AI handoff prompt.
+
+Use Python 3.12+ and Node.js 22+ (Node runs JavaScript syntax checks and UI logic tests). There are no pip or npm dependencies.
 
 Before submitting, run:
 
 ```powershell
 python -m unittest discover -v
+node --check ui/api.js
+node --check ui/state.js
+node --check ui/runtime.js
 node --check ui/app.js
+node --test test_ui.cjs
 ```
 
 Tests use temporary folders, synthetic data and mocked public APIs. They must **never** install a real plugin or change a real Harness profile.
@@ -63,6 +78,9 @@ Tests use temporary folders, synthetic data and mocked public APIs. They must **
 - The catalog may only fetch fixed public registry and GitHub endpoints, never arbitrary user-supplied URLs.
 - Keep the explicit user action to start installation. Recording is mandatory: automate backup, first-run supervision, stability and bidirectional recovery-data checks, and saving. Request intervention on exceptions only; do not allow changed installations to discard their records.
 - Preflight file combinations without live mutations before executing one transaction. Keep runtime reads current-only and isolate old-data conversion in the checkpointed migration tool, keep content-addressed revisions/dependency graphs/combinations immutable, and cover recovery changes with isolated failure/interruption fixtures.
+- Follow the [architecture and data contract](docs/architecture.md). Domain modules must not depend on Manager, HTTP or disk. Inject infrastructure dependencies explicitly. Separate content identities from sampling metadata, mutate recording state through `RecordingSession.transition`, and decode all transaction commands before execution.
+- Current control data accepts format 3 only. The migrator accepts complete v2 stores, verifies an isolated stage and then swaps directories. Optional fields retain their meaning; required new semantics declare `requiredFeatures`, which unsupported readers must reject. Do not rewrite immutable object contracts merely because control metadata changed version.
+- Update browser state through the reducer and reject stale responses. Do not mutate server snapshots directly or automatically retry writes. Branch on error `code`, never translated message text.
 - The UI runs under a strict Content Security Policy: no inline scripts, inline `style` attributes or CDN assets. When editing `ui/index.html`, keep the element ids that `ui/app.js` relies on.
 - After UI changes, check the wide layout as well as the layouts below 1120 px and 760 px.
 

@@ -10,7 +10,7 @@
 
 如果你把私人内容放在受记录的规则、技能或配置文件中，快照里也会包含这些内容。请妥善保管启动器的数据目录和补丁暂存目录。记录范围默认排除标准的凭据和会话位置，但无法识别嵌在受记录文件中的任意机密信息。
 
-dsh-purge 解包目录的保护通过文件元数据检测普通编辑；原始归档和重放的文件内容使用内容哈希校验。这是一个恢复工具，不是防篡改的系统审计，也不是运行不可信插件的沙箱。
+dsh-purge 新建记录通过内容哈希校验解包目录与预设；缺少历史内容哈希的旧记录保留元数据校验。原始归档、重放的文件内容和新建目录移动事务同样使用内容哈希校验。这是一个恢复工具，不是防篡改的系统审计，也不是运行不可信插件的沙箱。
 
 发现漏洞时，请优先使用仓库的私密安全报告功能（如果已开启）；否则请联系维护者，不要在公开 issue 中附上利用凭据或个人文件。
 
@@ -22,6 +22,6 @@ Discovery sends the entered search query to npm (or the explicitly selected npmm
 
 Snapshots can contain private material if you place it in a tracked rules, skills or configuration file. Keep the launcher data directory and patch stashes private. File scopes exclude standard credential and session locations; they do not detect arbitrary secrets embedded in tracked files.
 
-The dsh-purge extracted directory guard uses file metadata to detect ordinary edits. The original archive and replayed file blobs use content hashes. This is a recovery tool, not a tamper-proof system audit or a sandbox for untrusted plugins.
+New dsh-purge records verify extracted folders and presets using content hashes; older records without historical hashes retain metadata checks. The original archive, replayed file blobs and new directory-move transactions also use content hashes. This is a recovery tool, not a tamper-proof system audit or a sandbox for untrusted plugins.
 
 Report vulnerabilities through the repository's private security reporting feature if available; otherwise contact the maintainer without including exploit credentials or personal files in a public issue.

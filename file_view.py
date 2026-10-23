@@ -4,10 +4,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
 
 from patch_modes import PatchError, file_hash
+from domain import DomainError, SnapshotEntry
 
 
 class FileView:
@@ -16,6 +18,16 @@ class FileView:
         self.entries = {}
         self.hashes = {} if hashes is None else hashes
         for root in self.roots:
+            # The root itself may be represented as a link, but reaching a
+            # descendant through a linked ancestor would silently enumerate an
+            # unrelated tree. Recheck even paths resolved earlier by settings.
+            for parent in root.parents:
+                try:
+                    info = parent.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                    raise PatchError('预检根目录的上级路径不能经过链接：' + str(parent))
             self._capture(Path(root))
         self._index_children()
 
@@ -34,16 +46,31 @@ class FileView:
         clone.hashes = self.hashes
         return clone
 
-    def _capture(self, path):
-        if path in self.entries or not (path.exists() or path.is_symlink()):
+    def _capture(self, path, info=None):
+        if path in self.entries:
             return
-        info = path.lstat()
+        try:
+            info = path.lstat() if info is None else info
+        except FileNotFoundError:
+            return  # A configured root may legitimately be absent.
         if getattr(info, 'st_file_attributes', 0) & 0x400 or stat.S_ISLNK(info.st_mode):
             entry = {'type': 'link', 'target': str(path.resolve())}
         elif stat.S_ISDIR(info.st_mode):
             entry = {'type': 'dir'}
-            for child in path.iterdir():
-                self._capture(child)
+            try:
+                # Recheck directories before descending: an entry observed by
+                # its parent must not have become a junction in the meantime.
+                current = path.lstat()
+                if (not stat.S_ISDIR(current.st_mode)
+                        or getattr(current, 'st_file_attributes', 0) & 0x400):
+                    raise PatchError('预检期间目录被替换，请刷新重试：' + str(path))
+                with os.scandir(path) as children:
+                    for child in children:
+                        # On Windows this reuses enumeration metadata instead
+                        # of opening every child for exists() and lstat().
+                        self._capture(Path(child.path), child.stat(follow_symlinks=False))
+            except OSError as exc:
+                raise PatchError('预检期间目录发生变化或无法读取：' + str(path)) from exc
         elif stat.S_ISREG(info.st_mode):
             entry = {'type': 'file', 'size': info.st_size, 'mtime': info.st_mtime_ns,
                      'stamp': [info.st_size, info.st_mtime_ns, info.st_ctime_ns], 'source': path}
@@ -61,8 +88,12 @@ class FileView:
         return self.entries.get(Path(path), {}).get('type') == 'dir'
 
     def _stable(self, entry):
-        info = entry['source'].stat()
-        if [info.st_size, info.st_mtime_ns, info.st_ctime_ns] != entry['stamp']:
+        try:
+            info = entry['source'].lstat()
+        except OSError as exc:
+            raise PatchError('预检期间文件发生变化或无法读取：' + str(entry['source'])) from exc
+        if (not stat.S_ISREG(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400
+                or [info.st_size, info.st_mtime_ns, info.st_ctime_ns] != entry['stamp']):
             raise PatchError('预检期间文件发生变化，请刷新重试：' + str(entry['source']))
 
     def hash(self, path):
@@ -110,7 +141,7 @@ class FileView:
     def children(self, root):
         return sorted(self.child_paths.get(root, ()), key=lambda p: p.name.lower())
 
-    def tree_hash(self, root):
+    def tree_hash(self, root, *, content=False):
         root = Path(root)
         if not self.is_dir(root):
             raise PatchError('补丁目录不可用或被替换为链接：' + str(root))
@@ -124,6 +155,8 @@ class FileView:
                     line = ['dir', relative]
                 elif entry['type'] == 'link':
                     line = ['link', relative, entry['target']]
+                elif content:
+                    line = ['file', relative, self.hash(path)]
                 else:
                     line = ['file', relative, entry['size'], entry['mtime']]
                 h.update(json.dumps(line, ensure_ascii=False).encode('utf-8'))
@@ -132,6 +165,12 @@ class FileView:
 
     def change(self, path, before, after, equal, source=None):
         path = Path(path)
+        try:
+            for value in (before, after):
+                if value is not None:
+                    SnapshotEntry.decode(value)
+        except DomainError as exc:
+            raise PatchError('切换文件记录无效：' + str(exc)) from exc
         actual = self.entry(path)
         if equal(actual, after):
             return False  # Never undo a no-op into a state we did not start with.
@@ -148,11 +187,17 @@ class FileView:
             if (parent is not None and parent['type'] != 'dir') or (parent is None and covered_parent):
                 raise PatchError('目标父路径不是目录：' + str(path.parent))
             self.entries[path] = {**after, 'source': source} if after['type'] == 'file' else dict(after)
+            # Snapshot timestamps describe the restored destination, while the
+            # bytes in this overlay come from a content-addressed blob. Never
+            # compare that blob's stat against the original live file's stamp.
+            self.entries[path].pop('stamp', None)
             self.child_paths.setdefault(path.parent, set()).add(path)
         return True
 
     def move(self, source, dest):
         source, dest = Path(source), Path(dest)
+        if source == dest or source.is_relative_to(dest) or dest.is_relative_to(source):
+            raise PatchError('切换目录不能移动到自身或相互嵌套的路径。')
         if not self.exists(source) or self.exists(dest):
             raise PatchError('切换前预检发现目录冲突：' + str(dest))
         pending, moving = [(source, dest)], []

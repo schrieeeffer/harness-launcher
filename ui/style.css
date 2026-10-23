@@ -542,7 +542,7 @@ a.button.subtle { color: var(--accent-text); }
 .notice.danger p { color: #7d2a22; }
 .notice > div:not(.notice-actions) { flex: 1; min-width: 0; }
 .notice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.exe-warning { align-items: center; margin-bottom: 20px; }
+.exe-warning, .connection-warning { align-items: center; margin-bottom: 20px; }
 
 .inline-error {
   margin: 12px 0;
@@ -872,7 +872,9 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 
   .stepper { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .exe-warning { flex-wrap: wrap; }
+  .exe-warning, .connection-warning { flex-wrap: wrap; }
+  .connection-warning { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; }
+  .connection-warning > .button { grid-column: 2; justify-self: start; }
   .dialog-head, .dialog-body, .dialog-actions { padding-left: 16px; padding-right: 16px; }
   .catalog-tabs { width: 100%; }
   .catalog-tabs button { flex: 1; padding: 6px 4px; }
@@ -886,6 +888,9 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 
 @media (max-width: 480px) {
   :root { --bar-h: 188px; }
+  .toolbar { flex-direction: column; align-items: stretch; }
+  .toolbar .search { flex: none; width: 100%; }
+  .toolbar .bulk { align-self: flex-end; flex-shrink: 0; white-space: nowrap; }
   .launch-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
   .action-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .launch-actions .button { padding-left: 8px; padding-right: 8px; }
