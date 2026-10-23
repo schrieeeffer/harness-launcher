@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### 0.3.1 launch progress and unchanged-combination performance
+
+- Renamed Apply to `仅应用，不启动` (Apply without launching), clarified that switches edit a draft, and made it explicit that Launch applies changes automatically.
+- Added a blue-purple progress bar with stage labels, actual file/change counts and elapsed time. Progress remains readable independently of the manager lock, adapts to narrow windows and respects reduced motion. Launch/apply requests no longer time out merely because five minutes have elapsed; writes are never automatically retried.
+- Launching a sealed, unchanged combination now freshly verifies active file contents, installed dependencies and host identity without rebuilding the native baseline, undoing/replaying layers or creating another configuration backup. Switching combinations retains the full transaction and rollback validation. Same-size, same-timestamp content edits still block launch.
+- Added regression tests for the unchanged path, active-file and package drift, dormant adapter handling, failed process creation, concurrent control changes, progress isolation and long-running UI operations. See `docs/launch-progress.md` and `docs/launch-progress.en.md` for screenshots, measurements and their limits.
+
 ### 0.3.0 regression fixes
 
 - Preserve draft selections when saved schemes change or lose plugins, refresh full state on reconnect or return to the page, and reject malformed backup/patch responses without replacing the last valid UI state. Scheme checks accept display-order differences while retaining version locks.

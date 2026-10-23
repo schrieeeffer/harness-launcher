@@ -29,13 +29,13 @@ from adapters import PURGE, is_adapter
 from errors import LauncherError, error_payload
 from settings_store import load_settings, validate_settings
 from storage import atomic_write, write_json
-from operations import OperationLog
+from operations import OperationLog, report_progress
 from plugin_tracking import PluginTracking
 from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -390,12 +390,14 @@ class Manager:
 
     def switch_layers(self, selection, plugins, before, after, native):
         tracker = self.tracking
+        report_progress('check', '检查安装记录与配置')
         tracker.guard(check_files=True)
         registered = set(tracker.load()['records'])
         unknown = [p['id'] for p in plugins if not is_adapter(p['id']) and p['id'] not in registered]
         if unknown:
             raise PatchError('这些插件缺少安装前记录，无法可靠切换文件组合：' + '、'.join(unknown) +
                              '。请先恢复干净的安装，再通过启动器安装并自动记录；不能用安装后的快照补记。')
+        report_progress('packages', '校验插件版本与依赖文件')
         tracker.check_versions(plugins, selection)
         planner = SwitchPlan(tracker)
         plan = planner.prepare(selection, plugins, before, after, native)
@@ -406,6 +408,7 @@ class Manager:
 
     def apply(self, selection, revision, launch=False, native=False, scheme=None):
         with self.lock:
+            report_progress('check', '检查运行状态与插件选择')
             self.require_stopped()
             try:
                 self.tracking.guard()
@@ -434,7 +437,15 @@ class Manager:
             changed = ordered != bundles
             controller = self.tracking.core
             has_layer = controller.record.is_file() or any(is_adapter(p['id']) for p in plugins)
-            if changed or has_layer:
+            # An already sealed combination can be launched without undoing and
+            # replaying every layer. Still hash live contents on every launch.
+            try:
+                current_verified = (launch and not changed and
+                                    SwitchPlan(self.tracking).verify_current(selection, plugins, raw))
+            except PatchError as exc:
+                raise MenuError(str(exc), code=exc.code, details=exc.details,
+                                recovery=exc.recovery, retryable=exc.retryable) from exc
+            if not current_verified and (changed or has_layer):
                 self.backup(raw, bundles, "启动前切换" if launch else "保存插件选择")
                 # Recheck after backup, before the single atomic config replacement.
                 self.require_stopped()
@@ -443,8 +454,11 @@ class Manager:
             payload = (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode('utf-8') if changed else raw
             receipt = None
             try:
-                receipt = self.switch_layers(selection, plugins, raw, payload, native)
+                if not current_verified:
+                    receipt = self.switch_layers(selection, plugins, raw, payload, native)
                 if launch:
+                    report_progress('launch', '正在发送 Harness 启动请求')
+                    self.require_stopped()
                     env = os.environ.copy()
                     env["DSH_HOME"] = str(self.home)
                     subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env,
@@ -462,7 +476,8 @@ class Manager:
             result = {"message": ("启动请求已发送" if launch else "插件配置已保存") +
                       (f" · 已选择 {len(selection)} 个额外插件" if selection else " · 不加载额外插件"),
                       "changed": changed, "launched": launch,
-                      "patchMode": receipt['mode'] if receipt else None}
+                      "patchMode": receipt['mode'] if receipt else ('plugin' if selection else 'native'),
+                      "verifiedCurrent": bool(current_verified)}
             candidate = copy.deepcopy(self.settings)
             candidate["order"] = [p["id"] for p in plugins]
             candidate["lastSelection"] = list(selection)
@@ -776,7 +791,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.operation_id = self.server.operations.begin(urlparse(self.path).path.removeprefix('/api/'))
             except LauncherError as exc:
                 return self.error(exc)
-            self.post(body)
+            with self.server.operations.reporting(self.operation_id):
+                report_progress('check', '等待文件操作完成并检查配置')
+                self.post(body)
         finally:
             if getattr(self, 'operation_id', None):
                 self.server.operations.finish(self.operation_id, self.operation_error)

@@ -3,10 +3,31 @@ import threading
 import unittest
 
 from errors import LauncherError
-from operations import OperationLog
+from operations import OperationLog, report_progress
 
 
 class OperationLogTests(unittest.TestCase):
+    def test_progress_is_real_work_isolated_by_operation_and_thread(self):
+        log = OperationLog()
+        first = log.begin('launch')
+        with log.reporting(first):
+            report_progress('files', '校验文件', 10, 20)
+            worker = threading.Thread(target=lambda: report_progress('launch', 'unrelated'))
+            worker.start()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            progress = log.snapshot()['current']['progress']
+            self.assertEqual((progress['step'], progress['completed'], progress['total']), (3, 10, 20))
+        report_progress('launch', 'outside')
+        self.assertEqual(log.snapshot()['current']['progress'], progress)
+        log.finish(first)
+        second = log.begin('apply')
+        log.progress(first, 'launch', 'late')
+        self.assertIsNone(log.snapshot()['current']['progress'])
+        with self.assertRaises(ValueError):
+            log.progress(second, 'files', 'bad count', 21, 20)
+        self.assertEqual(log.snapshot()['last']['progress'], progress)
+
     def test_lifecycle_preserves_previous_completed_operation(self):
         wall, elapsed = [100.0], [0.0]
         log = OperationLog(clock=lambda: wall[0], monotonic=lambda: elapsed[0])

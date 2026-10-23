@@ -150,10 +150,18 @@
             <p id="selectionDescription" class="launch-description">正在读取本机插件…</p>
             <ul id="selectionList" class="selection-list" aria-label="将加载的插件"></ul>
             <div id="draftStatus" class="draft-status">读取配置中</div>
+            <section id="launchProgress" class="launch-progress" aria-label="启动与应用进度" hidden>
+              <div class="progress-heading"><strong id="progressLabel">准备启动</strong><span id="progressElapsed">0 秒</span></div>
+              <div id="progressTrack" class="progress-track" role="progressbar" aria-label="操作阶段进度" aria-valuemin="0" aria-valuemax="5">
+                <div id="progressFill" class="progress-fill"></div><span id="progressThumb" class="progress-thumb" aria-hidden="true"></span>
+              </div>
+              <div class="progress-caption"><span id="progressDetail">等待后台报告进度</span><span id="progressStep">阶段进度</span></div>
+              <p id="progressHint" class="progress-hint" hidden>后台仍在处理文件，请保持启动器运行。进度按实际阶段更新，不估算剩余时间。</p>
+            </section>
             <div class="launch-actions">
               <button id="launch" class="button primary">启动 Harness<svg class="icon" aria-hidden="true"><use href="#i-arrow-up-right"/></svg></button>
               <div class="action-row">
-                <button id="apply" class="button">应用选择</button>
+                <button id="apply" class="button" title="仅保存选择并同步补丁，不启动 Harness">仅应用，不启动</button>
                 <button id="saveScheme" class="button">保存为方案</button>
               </div>
             </div>
@@ -232,7 +240,7 @@
       <section class="settings-section">
         <h3>如何使用</h3>
         <ul class="help-list">
-          <li>勾选只改变本次待选列表。点击「启动 Harness」会备份并同步插件和补丁后打开应用；「应用选择 / 还原为原生」只切换，不启动。</li>
+          <li>开关只调整待选组合。「启动 Harness」会自动应用变更后启动；组合未变时校验当前文件后直接启动。「仅应用，不启动 / 仅还原，不启动」用于提前同步配置与补丁。</li>
           <li>关闭插件不会卸载插件。安装新插件请使用「手动添加」或从「发现插件」选用，安装前会自动建立快照；各插件能否还原可在「补丁记录」查看。官方基础组件不能关闭，插件启动次序沿用配置中的顺序。</li>
           <li>切换前请完全退出 Harness，包括托盘。菜单会检查运行状态，不会强制关闭会话。</li>
           <li>dsh-purge 支持自动还原：原生模式使用保留的官方归档，并暂存插件注入规则、提示词和红队预设；启用时恢复同版本补丁快照。其他插件可通过通用安装前后快照登记文件差异，无需逐个写适配器；没有安装前记录时仍会阻止宣称完整还原。账号、会话和普通偏好不重置。</li>

@@ -12,7 +12,7 @@ Choose which plugins to load on each launch, discover official and community plu
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.3.0%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.3.1%20preview-orange.svg)
 
 [简体中文](README.md) · **English**
 
@@ -26,6 +26,7 @@ Choose which plugins to load on each launch, discover official and community plu
 ## Contents
 
 - [Updated feature tour and verification screenshots](docs/feature-tour.en.md)
+- [0.3.1 launch progress, button labels and performance verification](docs/launch-progress.en.md)
 - [Why it exists](#why-it-exists)
 - [Features](#features)
 - [Getting started](#getting-started)
@@ -175,7 +176,7 @@ Selections remain unapplied while disconnected, and changing them cannot reenabl
 
 ### Choosing plugins for this launch
 
-The switch on each plugin card decides whether it loads this time. **Toggling only changes the pending selection; Harness is not modified** until you click **Launch Harness** (启动 Harness) or **Apply** (应用选择). Above the list you can search by name or description, select all (全选), or turn everything off (全部关闭).
+The switch on each plugin card decides whether it loads this time. **Toggling only changes the pending selection.** Click **Launch Harness** (启动 Harness) to apply it automatically and start Harness. Use **Apply without launching** (仅应用，不启动) to synchronize configuration and patches in advance. Above the list you can search by name or description, select all (全选), or turn everything off (全部关闭).
 
 Card badges:
 
@@ -211,10 +212,10 @@ Newly saved schemes also pin current plugin and Harness versions. Inspect and re
 The launch panel has three buttons:
 
 - **Launch Harness** (启动 Harness): apply the current selection, then start Harness.
-- **Apply** (应用选择): apply without starting Harness. When no extra plugins are selected, it becomes **Restore native** (还原为原生).
+- **Apply without launching** (仅应用，不启动): synchronize configuration and patches in advance. With no extra plugins selected, the label becomes **Restore without launching** (仅还原，不启动). You do not need to press this before Launch.
 - **Save as scheme** (保存为方案): save the selection without modifying Harness.
 
-When applying, the launcher:
+When launching an unchanged, previously saved combination, the launcher freshly verifies active files, package dependencies and the host version, then starts Harness without redundant undo, replay or backups. Actual content changes still block launch. When a combination needs switching, the launcher:
 
 1. Checks that Harness, including its tray icon, has fully exited, that the executable path is valid, and that no install recording is in progress. **It never forcibly ends a running session.**
 2. Checks that `package.json` has not been changed by Harness or another program since it was read. If it has, you are asked to refresh and try again; external edits are never overwritten.
@@ -223,7 +224,7 @@ When applying, the launcher:
 5. Simulates the entire switch in a read-only view, verifying bidirectional copies, the native base, plugin dependencies and target files, then rechecks inputs. One transaction undoes current layers, switches the adapter and configuration, applies target layers and verifies the final result. Failed preflight leaves live files untouched.
 6. If you chose to launch, starts Harness with `DSH_HOME` pointing at the current data directory. If any step fails, everything rolls back to the state before the switch.
 
-The panel's status line shows the current situation: in sync with the current configuration (与当前配置一致), pending (待应用 · 同步插件与补丁), quit Harness first (切换前请完全退出 Harness), executable not found (未找到 Harness 程序), or switching in progress (正在校验与切换补丁…).
+The status line shows whether the selection is current, pending, blocked by a running Harness or missing executable, or being processed. Launch and apply operations also show a blue-purple progress bar with actual stages, file or change counts, and elapsed time. Uncounted stages use a waiting animation; the bar does not estimate remaining time. See the [0.3.1 screenshots and measurements](docs/launch-progress.en.md).
 
 > [!IMPORTANT]
 > Restore native refuses to claim a complete official state when a plugin without a pre-install record may have changed files. Disabling a plugin never uninstalls it: installed dependencies, accounts, sessions and ordinary preferences are kept.

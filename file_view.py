@@ -209,16 +209,25 @@ class FileView:
             self.entries[target] = self.entries.pop(path)
         self._index_children()
 
-    def snapshot(self, scopes):
+    def snapshot(self, scopes, progress=None):
         result = {}
         def visit(scope, path, relative):
-            result[scope + '|' + relative] = self.entry(path)
+            yield scope + '|' + relative, path
             if self.is_dir(path):
                 for child in self.children(path):
                     if child.name.startswith('.harness-launcher-'):
                         continue
-                    visit(scope, child, child.name if relative == '.' else relative + '/' + child.name)
-        for scope, root in scopes.items():
-            if self.exists(root):
-                visit(scope, root, '.')
+                    yield from visit(scope, child, child.name if relative == '.' else relative + '/' + child.name)
+        paths = ((key, path) for scope, root in scopes.items() if self.exists(root)
+                 for key, path in visit(scope, root, '.'))
+        count = 0
+        if progress:
+            paths = list(paths)
+            total = sum(self.is_file(path) for _, path in paths)
+            progress(0, total)
+        for key, path in paths:
+            result[key] = self.entry(path)
+            if progress and self.is_file(path):
+                count += 1
+                progress(count, total)
         return result

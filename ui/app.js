@@ -111,7 +111,7 @@ function updateSummary() {
   const titles = {current: '当前配置', none: '原生模式（全部关闭）', all: '全部可用插件', custom: '自定义组合', scheme: model.draft.scheme};
   $('selectionTitle').textContent = titles[model.draft.mode] || '自定义组合';
   $('selectionTitle').title = $('selectionTitle').textContent;
-  $('selectionDescription').textContent = model.draft.ids.length ? '启用插件时自动恢复已校验的补丁快照。' : '应用或启动时还原已适配补丁，保留账号与会话。';
+  $('selectionDescription').textContent = '开关只调整待选组合；点击启动会自动应用。也可仅应用，不启动 Harness。';
   $('selectionList').replaceChildren(...(model.draft.ids.length ? selection().map(id => element('li', '', id)) : [element('li', 'none', '仅加载官方基础组件')]));
   const patch = model.server.patchMode || {};
   const unknown = patch.unknown?.filter(name => name !== model.server?.tracking?.session?.plugin) || [];
@@ -125,10 +125,37 @@ function updateSummary() {
   const operationNames = {apply: '应用插件组合', launch: '校验并启动 Harness', restore: '恢复配置', settings: '保存路径设置', scheme: '保存方案', import: '导入方案', 'tracking/begin': '建立安装快照', 'tracking/retry': '重新校验安装', 'tracking/abandon': '检查并取消安装'};
   const currentOperation = model.operation.current;
   const operationText = currentOperation ? '正在执行：' + (operationNames[currentOperation.kind] || currentOperation.kind) + ' · ' + Math.floor((currentOperation.durationMs || 0) / 1000) + ' 秒' : '正在处理，请稍候…';
-  $('draftStatus').textContent = disconnected ? '连接恢复并读取实际状态后才能操作' : model.operation.busy ? operationText : missing ? '未找到 Harness 程序 · 请先修正应用路径' : recording ? model.server?.tracking?.session?.error ? '安装记录需要处理' : '安装记录自动完成中' : model.server.running ? '切换前请完全退出 Harness' : hasUntracked() ? '存在未记录插件 · 组合切换已暂停' : isChanged() || needsPatchSwitch() ? '待应用 · 同步插件与补丁' : '与当前配置一致';
+  $('draftStatus').textContent = disconnected ? '连接恢复并读取实际状态后才能操作' : model.operation.busy ? operationText : missing ? '未找到 Harness 程序 · 请先修正应用路径' : recording ? model.server?.tracking?.session?.error ? '安装记录需要处理' : '安装记录自动完成中' : model.server.running ? '切换前请完全退出 Harness' : hasUntracked() ? '存在未记录插件 · 组合切换已暂停' : isChanged() || needsPatchSwitch() ? '待应用 · 点击启动会自动应用' : '与当前配置一致';
   $('draftStatus').title = $('draftStatus').textContent;
-  $('launch').title = disconnected ? '请先恢复连接并读取实际状态' : recording ? '安装记录完成后才能切换组合或重新启动' : model.server.running ? '请先退出 Harness（包括托盘）' : missing ? '请在设置中确认应用路径' : hasUntracked() ? '已有插件缺少安装前记录，组合切换已暂停' : '备份配置并启动 Harness';
-  $('apply').textContent = model.draft.ids.length ? '应用选择' : '还原为原生';
+  $('launch').title = disconnected ? '请先恢复连接并读取实际状态' : recording ? '安装记录完成后才能切换组合或重新启动' : model.server.running ? '请先退出 Harness（包括托盘）' : missing ? '请在设置中确认应用路径' : hasUntracked() ? '已有插件缺少安装前记录，组合切换已暂停' : '校验当前组合；如有选择变更，自动应用后启动 Harness';
+  $('apply').textContent = model.draft.ids.length ? '仅应用，不启动' : '仅还原，不启动';
+  $('apply').title = '把待选组合写入配置并同步补丁，不启动 Harness；直接点击启动也会自动完成这些操作。';
+  renderLaunchProgress();
+}
+
+function renderLaunchProgress() {
+  const operation = model.operation.current;
+  const visible = model.operation.busy && (!operation || ['launch', 'apply', 'restore'].includes(operation.kind));
+  $('launchProgress').hidden = !visible;
+  document.body?.classList.toggle('operation-visible', visible);
+  if (!visible) return;
+  const p = operation?.progress;
+  const valid = p && Number.isInteger(p.step) && p.step >= 1 && p.step <= 5 && p.steps === 5 && typeof p.label === 'string';
+  const counted = valid && Number.isInteger(p.completed) && Number.isInteger(p.total) && p.total > 0 && p.completed >= 0 && p.completed <= p.total;
+  const units = {files: '个文件', changes: '项改动'};
+  const detail = counted ? `${p.completed.toLocaleString()} / ${p.total.toLocaleString()} ${units[p.unit] || '项'}` : '正在处理 · 等待此阶段完成';
+  const fraction = valid ? (p.step - 1 + (counted ? p.completed / p.total : 0)) / p.steps : 0;
+  const seconds = Math.floor(Math.max(0, operation?.durationMs || 0) / 1000);
+  $('progressLabel').textContent = valid ? p.label : '准备操作，等待后台响应';
+  $('progressElapsed').textContent = seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  $('progressDetail').textContent = detail;
+  $('progressStep').textContent = valid ? `阶段 ${p.step} / ${p.steps}` : '阶段进度';
+  $('progressFill').style?.setProperty('width', `${Math.max(4, fraction * 100)}%`);
+  $('progressThumb').style?.setProperty('left', `${Math.max(4, fraction * 100)}%`);
+  $('progressTrack').setAttribute('aria-valuenow', String(valid ? p.step - 1 + (counted ? p.completed / p.total : 0) : 0));
+  $('progressTrack').setAttribute('aria-valuetext', $('progressLabel').textContent + '；' + detail);
+  $('progressTrack').classList.toggle('indeterminate', !counted);
+  $('progressHint').hidden = seconds < 30;
 }
 
 function renderTracking() {
@@ -222,7 +249,7 @@ async function trackingAction(action, body = {}) {
   await act(async () => {const result = await api('tracking/' + action, body); store.dispatch({type: 'tracking/received', tracking: await api('tracking')}); toast(result.message); if (!model.server?.tracking.busy && !model.server?.tracking.session) await refresh(true);});
 }
 function openScheme() { if (!model.server) return; $('schemeName').value = ''; $('schemePreview').textContent = model.draft.ids.length ? '包含：' + selection().join('、') : '此方案不加载额外插件。'; $('schemeError').hidden = true; $('schemeDialog').showModal(); $('schemeName').focus(); }
-async function apply(launch) { await act(async () => { const result = await api(launch ? 'launch' : 'apply', {selection: selection(), revision: model.server.revision, native: model.draft.ids.length === 0, scheme: model.draft.mode === 'scheme' ? model.draft.scheme : null}); await refresh(true); toast(result.message + (result.patchMode === 'native' ? ' · 已还原补丁' : result.patchMode === 'plugin' ? ' · 补丁快照已恢复' : '')); if (launch) store.dispatch({type: 'harness/started'}); }); }
+async function apply(launch) { await act(async () => { const result = await api(launch ? 'launch' : 'apply', {selection: selection(), revision: model.server.revision, native: model.draft.ids.length === 0, scheme: model.draft.mode === 'scheme' ? model.draft.scheme : null}, 0); await refresh(true); toast(result.message + (result.verifiedCurrent ? ' · 当前组合校验通过' : result.patchMode === 'native' ? ' · 已还原补丁' : result.patchMode === 'plugin' ? ' · 补丁快照已恢复' : '')); if (launch) store.dispatch({type: 'harness/started'}); }); }
 function renderBackups() {
   $('backupList').replaceChildren();
   if (!model.server.backups.length) $('backupList').append(element('div', 'empty', '暂无备份。首次修改配置前会自动创建。'));

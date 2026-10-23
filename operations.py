@@ -7,11 +7,23 @@ acquires the manager's potentially long-held file-operation lock.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import threading
 import time
 import uuid
 
 from errors import LauncherError, error_payload
+
+
+_reporter = ContextVar('operation_reporter', default=None)
+
+
+def report_progress(stage, label, completed=None, total=None, unit='files'):
+    """Publish actual work, never a time-based estimate; absent outside HTTP work."""
+    reporter = _reporter.get()
+    if reporter is not None:
+        reporter(stage, label, completed, total, unit)
 
 
 class OperationLog:
@@ -36,8 +48,33 @@ class OperationLog:
             self._started = self._monotonic()
             self._current = {'id': operation_id, 'kind': kind, 'status': 'running',
                              'startedAt': self._clock(), 'finishedAt': None,
-                             'durationMs': 0, 'error': None}
+                             'durationMs': 0, 'error': None, 'progress': None}
             return operation_id
+
+    @contextmanager
+    def reporting(self, operation_id):
+        token = _reporter.set(lambda *args: self.progress(operation_id, *args))
+        try:
+            yield
+        finally:
+            _reporter.reset(token)
+
+    def progress(self, operation_id, stage, label, completed=None, total=None, unit='files'):
+        stages = ('check', 'packages', 'files', 'sync', 'launch')
+        if stage not in stages or not isinstance(label, str):
+            raise ValueError('Invalid progress stage')
+        for value in (completed, total):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError('Invalid progress count')
+        if total is not None and (completed is None or completed > total):
+            raise ValueError('Invalid progress total')
+        with self._lock:
+            # Late callbacks can never modify the next operation.
+            if self._current is None or self._current['id'] != operation_id:
+                return
+            self._current['progress'] = {'stage': stage, 'label': label,
+                'step': stages.index(stage) + 1, 'steps': len(stages),
+                'completed': completed, 'total': total, 'unit': unit}
 
     def finish(self, operation_id, error=None):
         with self._lock:

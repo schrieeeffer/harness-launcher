@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from file_view import FileView
 from domain import digest, object_reference
 from operation_models import OperationError, decode_operation, validate_operations
 from recording_state import validate_registry
+from operations import report_progress
 from patch_modes import PatchError, archive_info, file_hash, put, tree_hash
 
 
@@ -28,6 +30,57 @@ class SwitchPlan:
         roots = list(self.tracker.scopes.values())
         roots += [self.manager.manifest_path, *self.core.extra_roots()]
         return roots
+
+    def verify_current(self, selection, plugins, manifest):
+        """Read-only launch of a sealed, unchanged combination.
+
+        Dormant adapter trees and rollback blobs are not executed on this path.
+        They are still fully checked whenever a switch needs them. Active files,
+        packages and the host are freshly hashed, including same-metadata edits.
+        """
+        self.tracker.verify_idle()
+        old = self.tracker.load()
+        reference = old.get('currentCombination')
+        if not reference:
+            return False
+        combination = self.tracker.read_object(reference)
+        if combination.get('manifestHash') != hashlib.sha256(manifest).hexdigest():
+            return False
+        if combination.get('selection') != selection:
+            return False
+        if any(record['enabled'] != (name in selection) for name, record in old['records'].items()):
+            return False
+        core_state = self.core.load()
+        if core_state and (core_state['mode'] != ('plugin' if self.core.adapter.plugin in selection else 'native')
+                           or combination.get('adapterRevision') != core_state['revision']):
+            return False
+        registered = set(old['records'])
+        if any(p['id'] not in registered and p['id'] != self.core.adapter.plugin for p in plugins):
+            return False
+        report_progress('packages', '校验已启用插件及依赖')
+        host = file_hash(Path(self.manager.settings['executable']))
+        lock = self.tracker.versions.lock(selection, plugins, old, host)
+        if any(combination.get(key) != value for key, value in lock.items()):
+            raise PatchError('当前组合的版本记录已变化，请刷新并重新应用选择。')
+        self.tracker.check_versions(plugins, selection)
+        if self.core.adapter.plugin in selection:
+            if not core_state:
+                return False
+            self.tracker.versions.verify_adapter(core_state, self.core.adapter.plugin)
+        report_progress('files', '校验当前组合文件')
+        view = FileView(self.tracker.scopes.values())
+        actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes,
+            progress=lambda done, total: report_progress('files', '校验当前组合文件', done, total)))
+        if actual != combination['state']:
+            raise PatchError('当前组合文件内容已变化，未启动 Harness。请检查记录之外的改动。')
+        # Recheck control inputs after potentially lengthy reads. This path
+        # neither creates a journal nor writes the manifest or plugin layers.
+        self.manager.require_stopped()
+        if (self.manager.manifest_path.read_bytes() != manifest or self.tracker.load() != old
+                or self.core.load() != core_state
+                or file_hash(Path(self.manager.settings['executable'])) != host):
+            raise PatchError('校验期间配置或版本记录发生变化，请刷新后重试。')
+        return True
 
     def _generic(self, view, operations, result, plugin, support=None):
         for op in operations:
@@ -105,6 +158,7 @@ class SwitchPlan:
             self.tracker.blob_bytes(entry['hash'])
 
     def prepare(self, selection, plugins, before, after, native):
+        report_progress('files', '扫描当前与暂存补丁文件')
         self.manager.require_stopped()
         self.manager.require_executable()
         old = self.tracker.load()
@@ -114,11 +168,13 @@ class SwitchPlan:
             return self._prepare(selection, plugins, before, after, native, old, previous_core, view)
 
     def _prepare(self, selection, plugins, before, after, native, old, previous_core, view):
+        report_progress('files', '校验文件并预演插件组合')
         if old.get('inventory'):
             recorded = self.tracker.recorded_state(old)
             if recorded is not None:
                 expected = self.tracker.versions.content_state(recorded)
-                actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes))
+                actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes,
+                    progress=lambda done, total: report_progress('files', '校验切换前文件', done, total)))
                 changed = [key for key in set(expected) | set(actual) if expected.get(key) != actual.get(key)]
                 if changed:
                     raise PatchError('记录窗口外发生了文件内容变化，未开始切换：' + '、'.join(sorted(changed)[:4]))
@@ -153,6 +209,7 @@ class SwitchPlan:
         previous_baseline = old.get('nativeBaselines', {}).get(host)
         if previous_baseline and self.tracker.read_object(previous_baseline) != baseline:
             raise PatchError('原生基线与已有记录不同，未修改文件。请检查应用更新或记录之外的改动。')
+        report_progress('files', '校验官方归档与还原快照')
         self._keep_baseline_blobs(native_view, baseline_snapshot)
         new.setdefault('nativeBaselines', {})[host] = baseline_ref
         core_plan = self.core.prepare(selection, core_plugins, before, after, native, view)
@@ -266,6 +323,7 @@ class SwitchPlan:
         self.tracker.save(plan['previous'])
 
     def execute(self, plan):
+        report_progress('sync', '复核切换条件')
         self.manager.require_stopped()
         self.manager.require_executable()
         self.validate(plan)
@@ -282,10 +340,13 @@ class SwitchPlan:
         put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
         try:
             for index, op in enumerate(plan['operations']):
+                report_progress('sync', '同步插件与补丁', index, len(plan['operations']), 'changes')
                 self.replay(op)
                 journal['cursor'] = index + 1
                 put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
-            actual = self.tracker.versions.content_state(FileView(self.tracker.scopes.values()).snapshot(self.tracker.scopes))
+            report_progress('sync', '校验切换结果')
+            actual = self.tracker.versions.content_state(FileView(self.tracker.scopes.values()).snapshot(self.tracker.scopes,
+                progress=lambda done, total: report_progress('sync', '校验切换结果', done, total)))
             if actual != plan['target']:
                 raise PatchError('切换后的文件未通过整套组合校验。')
             if plan['newCore']:

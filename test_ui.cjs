@@ -399,11 +399,39 @@ test('writes have a bounded five-minute wait and a timeout never retries the wri
   const ui = await app(); const online = ui.respond;
   ui.respond = (path, options) => options.method === 'POST'
     ? new Promise((resolve, reject) => options.signal.addEventListener('abort', () => {const error = new Error('timeout'); error.name = 'AbortError'; reject(error);})) : online(path);
-  const pending = ui.nodes.get('launch').onclick();
+  const pending = ui.run("act(() => api('scheme', {}))");
   const timeout = [...ui.timers.values()].find(timer => timer.delay === 300000); assert.ok(timeout);
   timeout.fn(); await pending;
   assert.match(ui.nodes.get('toast').textContent, /后台可能仍在执行/);
   assert.equal(ui.run('model.connection.status'), 'error');
   await ui.run('pollConnection()');
   assert.equal(ui.calls.filter(call => call.method === 'POST').length, 1);
+});
+
+test('launch shows measured stage counts and does not time out a working file check', async () => {
+  const ui = await app(); const online = ui.respond; let finish;
+  ui.respond = (path, options) => path === 'operations' ? response({current: {id: 'long-launch', kind: 'launch', durationMs: 361000,
+    progress: {step: 3, steps: 5, label: '校验当前组合文件', completed: 20, total: 40, unit: 'files'}}})
+    : options.method === 'POST' ? new Promise(resolve => {finish = () => resolve(response({message: 'started', verifiedCurrent: true}));}) : online(path);
+  const pending = ui.nodes.get('launch').onclick();
+  assert.equal([...ui.timers.values()].some(timer => timer.delay === 300000), false);
+  await [...ui.timers.values()].find(timer => timer.delay === 2000).fn();
+  assert.equal(ui.nodes.get('launchProgress').hidden, false);
+  assert.equal(ui.nodes.get('progressLabel').textContent, '校验当前组合文件');
+  assert.equal(ui.nodes.get('progressDetail').textContent, '20 / 40 个文件');
+  assert.equal(ui.nodes.get('progressElapsed').textContent, '6 分 1 秒');
+  assert.equal(ui.nodes.get('progressTrack')['aria-valuenow'], '2.5');
+  assert.equal(ui.nodes.get('progressHint').hidden, false);
+  finish(); await pending;
+  assert.equal(ui.nodes.get('launchProgress').hidden, true);
+  assert.match(ui.nodes.get('toast').textContent, /当前组合校验通过/);
+  assert.equal(ui.calls.filter(call => call.method === 'POST').length, 1);
+});
+
+test('apply-only control explains that toggles do not immediately modify Harness', async () => {
+  const ui = await app();
+  assert.equal(ui.nodes.get('apply').textContent, '仅应用，不启动');
+  assert.match(ui.nodes.get('selectionDescription').textContent, /开关只调整待选组合/);
+  ui.nodes.get('selectNone').onclick();
+  assert.equal(ui.nodes.get('apply').textContent, '仅还原，不启动');
 });

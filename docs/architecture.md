@@ -94,6 +94,18 @@ queue and cannot resume work after a restart; the file transaction journal does 
 `error`, `code`, `details`, `recovery`, `retryable`, `operationId`。
 机器分支判断应使用 `code`，不解析中文错误文本。`retryable` 只是提示，前端不得自动重放写请求。
 
+The optional `progress` field contains `stage`, `label`, `step`, `steps`,
+`completed`, `total` and `unit`. Stages are `check`, `packages`, `files`, `sync`
+and `launch`; counts are actual work in the current phase. They are not a time
+estimate, and phases without a known total remain indeterminate. Reporting is
+bound to the request context and operation id, so unrelated threads or late
+callbacks cannot update a different operation.
+
+0.3.1 的相同组合启动路径只在组合、配置、层顺序与版本锁完全匹配时使用。它重新计算在用文件的
+内容哈希并校验已启用的包与宿主，结束前再次检查控制输入；不修改配置、重放补丁或创建切换日志。
+未启用的内置暂存树不会在此路径执行，真正切换时仍须完整预检。不能把时间戳缓存替代内容验证，
+也不能把此路径用于安装、还原或改变组合。
+
 ## Validation and capacity / 验证与容量
 
 Use temporary synthetic installations for unit, HTTP, failure and recovery

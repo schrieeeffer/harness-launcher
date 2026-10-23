@@ -2,6 +2,8 @@
 
 [简体中文](feature-tour.md) · [Back to the user guide](../README.en.md)
 
+See [launch progress and verification](launch-progress.en.md) for the 0.3.1 progress bar, clearer button labels and performance fix. This page retains the 0.3.0 feature screenshots.
+
 This tour accompanies the 2026-10-24 verification. **Every screenshot uses an isolated demonstration environment.** Plugin names, paths, catalog entries and statistics illustrate the interface; they do not describe the user's installation or live rankings. Installation, launch, restoration and error examples do not establish compatibility with real third-party plugins. The interface remains in Chinese; control labels below match the screenshots.
 
 Automated checks: **250 Python backend tests: 248 passed, 2 skipped; all 30 frontend tests passed.** This tour contains 29 screenshots; the browser developer log contained no error or warn entries. The results below distinguish the real service restart, actual interactions in the isolated environment, simulated state displays and usage references. Branches not reproduced in this browser run are not reported as browser-verified.
