@@ -178,8 +178,6 @@ def running_harness():
 class Manager:
     def __init__(self, data=DATA, home=None, executable=None):
         self.data = Path(data).absolute()
-        if self.data.with_name(self.data.name + '.upgrade.json').exists():
-            raise MenuError('目录迁移尚未完成，请退出后运行 migrate.py --recover。', code='migration_pending')
         self.data.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.verification_cache = VerifiedContentCache(self.data / 'verification-cache.json')
@@ -393,7 +391,7 @@ class Manager:
 
     def validate_lock(self, lock, selection, plugins):
         if not isinstance(lock, dict):
-            raise MenuError('方案或备份缺少新版版本记录，请先运行 migrate.py。')
+            raise MenuError('方案或备份缺少有效版本记录，请保留原文件并重新保存方案或选用有效备份。')
         expected = self.tracking.versions.lock(selection, plugins, self.tracking.load(),
                                              file_hash(Path(self.settings['executable'])))
         if lock != expected:
@@ -531,7 +529,7 @@ class Manager:
             if not isinstance(info, dict) or info.get("target") != str(self.manifest_path):
                 raise MenuError("此备份不属于当前桌面配置。")
             if info.get('format') != 3:
-                raise MenuError('备份需要先通过 migrate.py 转为新版格式。')
+                raise MenuError('此备份格式不受支持，请保留原文件并选择当前格式的备份。')
             try:
                 restored = json.loads(info["content"])
                 restored_bundles = restored["dsh"]["profile"]["bundles"]
@@ -999,20 +997,14 @@ def main():
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--data", type=Path, default=DATA)
     args = parser.parse_args()
-    if args.data.with_name(args.data.name + '.upgrade.json').exists():
-        raise MenuError('目录迁移尚未完成，请先运行 migrate.py --recover。')
     args.data.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=args.data / "launcher.log", level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
-    if any((args.data / name).exists() for name in ('import-pending.json', 'migration-pending.json')):
-        raise MenuError('数据迁移尚未结束，请先运行 migrate.py --apply。')
     with instance_lock(args.data) as owned:
         serve(args, owned)
 
 
 def serve(args, owned):
-    if args.data.with_name(args.data.name + '.upgrade.json').exists():
-        raise MenuError('目录迁移尚未完成，请先运行 migrate.py --recover。')
     # Fixed loopback port makes repeated shortcuts reopen the same local menu.
     port = 17643
     instance_path = args.data / "instance.json"

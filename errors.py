@@ -27,7 +27,7 @@ class StorageError(PatchError):
 
 class SchemaError(LauncherError):
     code = 'unsupported_schema'
-    recovery = '退出启动器，使用独立迁移命令转换数据。'
+    recovery = '保留原数据；选择当前格式的数据目录或从有效备份恢复。'
 
 
 def error_payload(error, operation_id=None):

@@ -130,7 +130,6 @@ own regression validation.
 | Browser / 前端 | `ui/api.js`, `ui/state.js`, `ui/runtime.js`, `ui/app.js` | 请求传输、不可变状态与 reducer、异步调度、DOM 呈现与事件 |
 | Maintenance / 插件维护 | `maintenance.py`, `maintenance_files.py`, `update_check.py`, `cache_gc.py` | 来源检查、检查点、首次运行验证、预览恢复与无引用回收；不进入日常扫描路径 |
 | Distribution / 分发 | `packaging/Launcher.cs`, `packaging/build_portable.py` | 白名单打包、官方运行时哈希验证、无命令启动入口 |
-| Offline conversion / 离线迁移 | `migrate.py` | 在独立暂存目录转换和核验旧数据；运行时不导入该模块 |
 
 `ContentStore` does not know about plugins or `Manager`. `VersionStore` receives
 paths, the content store and a read-only host archive dependency. Adapter rules
@@ -178,25 +177,7 @@ make replay unsafe.
 
 设置及登记表保留新增可选字段；其必要的新语义通过 `requiredFeatures` 声明，当前程序不支持时拒绝读取。
 可选字段须保持原语义、具有安全默认值，并在重新保存时保留。会话及事务命令字段保持严格解码，
-避免忽略字段后错误重放。更改必要语义必须提高对应契约版本并提供离线转换；不能承诺未来永不迁移。
-
-## Offline cutover / 离线切换
-
-1. Finish pending installations and transactions in the old version, then stop
-   both applications. Only complete v2 stores are accepted; missing history is
-   not fabricated, and older incomplete stores are not silently imported.
-2. `python migrate.py` builds and verifies a separate sibling stage. The preview
-   removes its temporary stage and does not change live Harness files or the source store.
-3. `python migrate.py --apply` verifies reachable objects, blobs, versions and
-   supported combinations before swapping directories. The complete old store
-   becomes `<data>.archive-<timestamp>-<id>` with a checksum manifest.
-4. A sibling `<data>.upgrade.json` guards the rename boundary. Use
-   `python migrate.py --recover` only if that cutover was interrupted. Keep all
-   involved directories until recovery has finished.
-
-对应中文流程：先用旧版结束未完成操作并退出；在独立目录预检；通过 `--apply` 切换新目录；
-仅目录切换中断时使用 `--recover`。自定义数据路径用 `--data <目录>`。新版不自动搜寻或合并旧 AppData。
-归档只作为离线恢复证据，不参与运行。归档不是 Harness 本体和用户数据的完整备份，需另行配套备份。
+避免忽略字段后错误重放。必要语义通过版本与能力声明进行检查；不支持的格式会被拒绝，不改写原数据。
 
 ## Operation and error API / 操作与错误 API
 
@@ -224,19 +205,19 @@ estimate, and phases without a known total remain indeterminate. Reporting is
 bound to the request context and operation id, so unrelated threads or late
 callbacks cannot update a different operation.
 
-0.3.1 的相同组合启动路径只在组合、配置、层顺序与版本锁完全匹配时使用。它重新计算在用文件的
+当前相同组合启动路径只在组合、配置、层顺序与版本锁完全匹配时使用。它重新计算在用文件的
 内容哈希并校验已启用的包与宿主，结束前再次检查控制输入；不修改配置、重放补丁或创建切换日志。
 未启用的内置暂存树不会在此路径执行，真正切换时仍须完整预检。不能把时间戳缓存替代内容验证，
 也不能把此路径用于安装、还原或改变组合。
 
-0.3.2 added an optional `preserveNative` transaction flag for ordinary plugin
+An optional `preserveNative` transaction flag for ordinary plugin
 switches that leave the built-in adapter inactive. It requires identical input,
 previous and target adapter states, a native mode, no selected adapter, and no
 adapter mutation except the profile manifest. Such plans exclude unused parked
 trees; active inputs are freshly verified and independently checked before commit.
 Enabling the adapter retains the full parked-tree and installed-code checks.
 
-0.3.2 在内置补丁保持原生时缩小预检范围。原生基线复用以当前内容、宿主和归档身份完全匹配为前提；
+当前在内置补丁保持原生时缩小预检范围。原生基线复用以当前内容、宿主和归档身份完全匹配为前提；
 实际使用的双向恢复副本始终校验。哈希每轮最多 32 个工作线程，进度由调用线程汇报，事务写入和恢复仍串行。
 `preserveNative` 不能掩盖内置目录移动或其他内置文件写入。`configurationOnly` 只允许一个 manifest 写入，
 变化插件必须具有空文件差异，前后组合的文件状态、基线和内置补丁版本必须相同；提交前验证旧组合。
@@ -264,10 +245,10 @@ timeouts and connection recovery. Fixture success is not whole-platform or
 third-party-plugin certification.
 
 `test_architecture.py` checks dependency boundaries, including that runtime
-modules do not import the offline migrator and domain/storage modules do not
+modules do not import tests and domain/storage modules do not
 depend on application coordinators.
 
 测试必须使用临时合成安装目录；重点覆盖非法状态、内容损坏、事务中断和异步旧响应。
-`test_architecture.py` 自动检查运行时与离线迁移的隔离，以及领域、存储层的依赖边界。
-内容库按哈希去重并提供容量统计；迁移只清理已核验暂存目录中的不可达旧对象。
+`test_architecture.py` 自动检查运行时与测试的隔离，以及领域、存储层的依赖边界。
+内容库按哈希去重并提供容量统计；维护清理只回收经引用复核的无引用内容对象。
 运行时不自动删除历史。0.4.0 的按需清理先计算完整引用可达性，再筛选超过宽限期的无引用对象，不能仅按文件年龄删除。维护和清理的测试与边界见[维护指南](plugin-maintenance.md)。

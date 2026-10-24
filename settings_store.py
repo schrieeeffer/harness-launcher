@@ -9,7 +9,7 @@ FORMAT = 3
 
 def validate_settings(value):
     if not isinstance(value, dict) or type(value.get('format')) is not int or value['format'] != FORMAT:
-        raise SchemaError('启动器数据需要离线迁移：请退出后运行 migrate.py --apply。')
+        raise SchemaError('启动器数据格式不受支持；请保留原数据并选择当前格式的数据目录。')
     features = value.get('requiredFeatures', [])
     if not isinstance(features, list) or features:
         raise SchemaError('此数据需要当前程序不支持的功能。')
@@ -45,5 +45,5 @@ def load_settings(path, defaults):
             raise SchemaError('设置文件损坏或不可读取，请从备份恢复。') from exc
     # An orphaned store must never be silently adopted under new settings.
     if any((path.parent / name).exists() for name in ('patches', 'backups')):
-        raise SchemaError('已有记录但缺少 settings.json，请恢复设置后离线迁移。')
+        raise SchemaError('已有记录但缺少 settings.json，请从有效备份恢复设置。')
     return validate_settings(dict(defaults, format=FORMAT, requiredFeatures=[]))

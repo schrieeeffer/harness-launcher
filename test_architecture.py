@@ -14,13 +14,12 @@ def dependencies(name):
 
 
 class ArchitectureTests(unittest.TestCase):
-    def test_runtime_never_depends_on_migration_or_tests(self):
+    def test_runtime_never_depends_on_tests(self):
         for path in ROOT.glob('*.py'):
-            if path.stem == 'migrate' or path.stem.startswith('test_'):
+            if path.stem.startswith('test_'):
                 continue
             with self.subTest(module=path.stem):
                 imports = dependencies(path.stem)
-                self.assertNotIn('migrate', imports)
                 self.assertFalse(any(name.startswith('test_') for name in imports))
 
     def test_domain_and_storage_do_not_depend_on_application_or_adapter(self):

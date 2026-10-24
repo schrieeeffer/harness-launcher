@@ -103,7 +103,7 @@ Links in a folder, including Windows junctions, are recorded by their target onl
 
 A record captures file differences **within a time window**, not a process audit; automatic checks cannot prove which process wrote a file. Work with only this plugin and do not edit other files during recording. Other-plugin installations, removals, upgrades or loading-combination changes block registration. New files and changes after scanning also block saving. Stable manual changes within scope may still be included: automatic recording must not be described as complete process attribution.
 
-Normal records save automatically. Installer or launch failures, ongoing writes and verification failures retain the original baseline. Fix the issue and select **Continue automatic recording**. After a crash or service restart, unfinished sessions enter an exception state instead of silently adopting changes made during downtime. Continuing observes another run or rescans. Finish old incomplete sessions in the previous version before running the migration tool.
+Normal records save automatically. Installer or launch failures, ongoing writes and verification failures retain the original baseline. Fix the issue and select **Continue automatic recording**. After a crash or service restart, unfinished sessions enter an exception state instead of silently adopting changes made during downtime. Continuing observes another run or rescans.
 
 Cancellation is allowed only when the plugin inventory and original files are unchanged. Once installation or file changes occur, cancellation cannot discard the record. The launcher does not automatically uninstall plugins or delete installed dependencies.
 
@@ -128,10 +128,9 @@ A plugin that is already installed without a record cannot have its unknown hist
 ## Plugin versions and combinations
 
 - **Plugin revisions**: immutable content-addressed revisions link source, actual version, before/after snapshots, delta and base-combination revision references. Installed package/dependency files are retained with required, optional and peer dependency edges and existing lock files. Identical contents share blobs. Missing required dependencies, unstable package contents or unsupported nested links pause saving.
-- **One-time conversion**: 0.3.0 `migrate.py` accepts complete v2 stores, converts a separate sibling stage and verifies objects, blobs and combinations before renaming the complete old root to `.archive-*` and installing the new root. Settings, registry, adapter state, switch journals and configuration backups use format 3. Runtime code reads neither archives nor old formats. Immutable objects retain their independent contracts; missing history and unfinished work stop migration. `--recover` handles interrupted directory cutover without modifying Harness files. See the [architecture and data contract](architecture.md).
 - **Native baseline**: keyed by the Harness executable hash, retains managed contents after all known patches are undone and official archive information. Every combination must return to that same base. An extra `app.asar.bak` is not the active official baseline. Accounts, sessions and installed dependencies stay in place.
 - **Combinations**: retain actual plugin versions, revision references, layer order, final bundle order, native base and expected file contents. Identical results share a record; failed switches do not register the target as current.
-- **Scheme and backup constraints**: newly saved schemes and configuration backups pin plugin versions, record references and Harness version. Changes stop their use; inspect and re-save the scheme. v2 conversion preserves existing locks and rewrites only references to converted objects; it does not rebind versions. Portable imports explicitly bind current local versions. Exports keep the existing name-only format and do not share local version artifacts or personal paths.
+- **Scheme and backup constraints**: newly saved schemes and configuration backups pin plugin versions, record references and Harness version. Changes stop their use; inspect and re-save the scheme. Portable imports explicitly bind current local versions. Exports keep the existing name-only format and do not share local version artifacts or personal paths.
 
 This phase retains versions and reliably switches supported combinations of currently installed versions. It does not yet expose one-click installation of historical versions or automatically merge text/binary patches. Configuration backups are not full plugin downgrades. Actual file conflicts are reported during preflight; this does not establish compatibility of every possible plugin combination.
 
@@ -145,7 +144,7 @@ This phase retains versions and reliably switches supported combinations of curr
 
 ## Storage
 
-Snapshots and state are kept in `%USERPROFILE%\.harness-launcher\patches\<id>\`. The `<id>` is derived from the Harness install folder and Harness data directory. Runtime data is separate from source code. Use `--data <directory>` for another location; keep the blobs and stash folders with their index. The default avoids Windows Store AppData virtualization. The new tool does not automatically search or merge old AppData. Convert a custom complete v2 store offline with `migrate.py --data <directory> --apply`.
+Snapshots and state are kept in `%USERPROFILE%\.harness-launcher\patches\<id>\`. The `<id>` is derived from the Harness install folder and Harness data directory. Runtime data is separate from source code. Use `--data <directory>` for another location; keep the blobs and stash folders with their index. The default avoids Windows Store AppData virtualization.
 
 | Path | Contents |
 | --- | --- |
@@ -156,8 +155,6 @@ Snapshots and state are kept in `%USERPROFILE%\.harness-launcher\patches\<id>\`.
 | `tracking\packages\`, `tracking\revisions\` | Package/dependency manifests and immutable plugin revisions |
 | `tracking\baselines\`, `tracking\combinations\` | Native bases, pre-install configuration and combination records |
 | `tracking\transactions\`, `tracking\switch.json` | Immutable whole-switch plans and active transaction position |
-| Sibling `<data>.archive-*` and `.manifest.json` | Complete previous store and checksum manifest for offline recovery only |
-| Sibling `<data>.upgrade.json`, `.stage-*` | Directory cutover journal and isolated stage; preserve and use `--recover` after interruption |
 | `tracking\logs\` | Output of the official installer |
 
 Files that are currently inactive are stashed in `resources\.harness-launcher-<id>` in the install folder and `.harness-launcher-<id>` in the data directory; they may hold official archives, plugin folders and presets. **Do not delete these folders by hand.**

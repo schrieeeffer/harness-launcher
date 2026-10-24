@@ -62,15 +62,13 @@ class PluginTracking:
         }
 
     def load(self):
-        if any((self.manager.data / name).exists() for name in ('import-pending.json', 'migration-pending.json')):
-            raise TrackingError('数据导入尚未结束，请退出启动器并完成离线导入。')
         if not self.index.is_file():
             return {'format': 3, 'requiredFeatures': [], 'records': {}, 'order': [], 'session': None}
         try:
             value = json.loads(self.index.read_text(encoding='utf-8'))
             return validate_registry(value)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise TrackingError('记录格式不是当前版本或已损坏，请保留 tracking 目录并检查离线导入结果。') from exc
+            raise TrackingError('记录格式不是当前版本或已损坏，请保留 tracking 目录并从有效备份恢复。') from exc
 
     def save(self, value):
         try:

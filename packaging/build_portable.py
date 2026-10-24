@@ -18,7 +18,7 @@ VERSION = '0.4.0'
 PYTHON = '3.13.17'
 RUNTIME_SHA = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
 MODULES = '''adapters bootstrap.ps1 cache_gc catalog domain errors file_view launch.vbs launcher maintenance
-maintenance_files migrate ntfs_journal operation_models operations patch_modes plugin_tracking
+maintenance_files ntfs_journal operation_models operations patch_modes plugin_tracking
 recording_state runtime_context settings_store storage switch_plan tree_checkpoint update_check
 verification_cache version_store'''.split()
 
@@ -64,7 +64,7 @@ def build():
 更新启动器：先退出旧启动器后台，解压新版到新文件夹后打开。
 配置与恢复数据保存在用户目录 .harness-launcher，不在程序文件夹里。
 不要删除这个数据目录来解决插件冲突；里面存有回滚材料。
-已有 v2 数据的用户需先按 README 的迁移说明处理；v3 用户继续使用原数据。
+数据目录只接受当前格式；格式不符时停止操作并保留原数据。
 
 本软件为社区预览版，主程序未做商业代码签名。请从 schrieeeffer/harness-launcher
 的 GitHub Releases 下载，并可用同页 SHA256SUMS.txt 核对文件。

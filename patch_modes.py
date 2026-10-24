@@ -203,7 +203,7 @@ class PatchModes:
             self.validate_state(state)
             return state
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise PatchError('补丁记录格式或内容无效，请保留记录并使用离线迁移工具检查。') from exc
+            raise PatchError('补丁记录格式或内容无效，请保留记录并从有效备份恢复。') from exc
 
     def validate_state(self, state):
         if (not isinstance(state, dict) or type(state.get('format')) is not int
