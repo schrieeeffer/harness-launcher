@@ -9,6 +9,7 @@
 - Recheck selected packages, dependencies, configuration and host immediately before process creation. Report `plugin_identity_changed` with recovery steps for changes outside an installation recording.
 - Pin host archives and other installed plugin/dependency contents before recording an upgrade. Pause on mixed updates and retain recovery evidence; advertise `recording-update-guards` while the session exists so older clients cannot silently bypass these rules.
 - Allow native operation after an inactive purge package update if managed native files are unchanged. Enabling the adapter still checks its complete version and snapshot. Automatic cross-Harness migration and purge upgrade adaptation remain unsupported.
+- Validate the final code on Windows CI: Python 3.12 and 3.13 each pass 351 Python tests without skips and 32 JavaScript tests. Four real-window restart/switch samples show the complete interface by 24.762–36.127 seconds; report observation bounds without claiming a strict 30-second guarantee. Publish the updated Settings guide, 32 screenshots, diagrams and [update validation](docs/update-validation-0.3.2.md).
 
 ## 0.3.2 — 2026-10-24
 
