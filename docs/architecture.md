@@ -69,12 +69,12 @@ flowchart TD
     FULL --> V["逐文件读句柄与 NTFS 内容缓存"]
     FULL --> SEAL["独占数据读句柄 + CLOSE 记录屏障\n重置遗留句柄的事件合并周期\n扫描期间无其他相关事件才保存检查点"]
     SEAL --> T
-    V --> S{"当前 NTFS 身份与缓存相同？"}
+    V --> S{"NTFS 身份、日志身份及文件 USN 均与缓存相同？"}
     S -->|是| HIT["复用已验证的 SHA-256"]
     S -->|否或元信息不可用| READ["重新读取内容计算 SHA-256"]
     HIT --> CHECK["再次核对身份，关闭句柄\n元信息不可用时执行完整读取与采样复核"]
     READ --> CHECK
-    CHECK --> CLEAN["仅替换同一文件的旧缓存项\n总量上限 100,000；不删除应用或恢复文件"]
+    CHECK --> CLEAN["新哈希取得 CLOSE 屏障后才缓存\n以屏障后 USN 替换同一文件旧条目\n上限 100,000；不删除应用或恢复文件"]
 ```
 
 </details>
@@ -136,7 +136,7 @@ tests, not scattered package-name branches.
 | Immutable packages, revisions, combinations and native baselines / 不可变包、版本、组合和原生基线 | Their existing `format: 1` contracts / 各自原有格式 1 | Content-addressed objects are independent of control-data versions / 对象格式独立于控制数据版本 |
 | Snapshot and delta objects / 快照及差异对象 | Stable existing JSON shape / 稳定 JSON 结构 | Explicit domain decoding; identity derives from canonical JSON / 领域解码，规范 JSON 决定内容标识 |
 | Portable schemes / 便携方案 | `harness-launcher-schemes-v1` | Package names only; bind local versions on import / 只传包名，导入时绑定本机版本 |
-| Optional NTFS verification cache / 可选 NTFS 校验缓存 | `format: 2` | Discard legacy/invalid cache and rebuild; never a recovery source / 旧格式或损坏时丢弃重建，不作为恢复来源 |
+| Optional NTFS verification cache / 可选 NTFS 校验缓存 | `format: 3` | Discard legacy/invalid cache and rebuild; never a recovery source / 旧格式或损坏时丢弃重建，不作为恢复来源 |
 
 Settings and registry loaders preserve additive fields. Their `requiredFeatures`
 declares capabilities a reader must understand; unsupported requirements stop

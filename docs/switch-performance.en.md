@@ -12,7 +12,7 @@ A read-only comparison against the retained official ASAR integrity table on 202
 
 The separate local verification-cache.json is not a scan root. Removing it forces content reads next time; it does not reduce the installed application's required file count.
 
-A sample before the final window matrix contains 14,695 entries for 14,695 distinct file identities, occupying 2,318,036 bytes. Atomic configuration replacements create new identities, so the count need not remain identical. No duplicate revisions for the same identity remained, and the 100,000-entry cap still applies. Two directory checkpoints contain 17,375 file/directory entries; their separate limits are 32 trees and 100,000 total entries. These indexes are not additional application copies.
+The final format-3 sample contains 14,648 entries for 14,648 distinct file identities, occupying 2,750,036 bytes. Atomic configuration replacements create new identities, so the count need not remain identical. No duplicate revisions for the same identity remained, and the 100,000-entry cap still applies. Two directory checkpoints contain 17,375 file/directory entries; their separate limits are 32 trees and 100,000 total entries. These indexes are not additional application copies.
 
 Progress counts include metadata checks. Cache hits still count as verified files even though their contents are not read again; the count alone does not indicate a cache miss.
 
@@ -38,12 +38,12 @@ See Microsoft's [FILE_BASIC_INFO documentation](https://learn.microsoft.com/en-u
 
 The local target was explicitly relaxed from a strict 30-second maximum to approximately 30 seconds. Timing includes verification, combination changes and Harness loading. Initial cache construction, changed files and journal-gap recovery may require a slower full check. Backend completion is not UI readiness.
 
-The final regression has 328 Python tests: 326 passed and two symbolic-link privilege skips; all 32 JavaScript tests passed. After a production launcher restart, four unchanged combinations and four switch directions showed the complete interface by **18.003–31.763 seconds**, with all subsequent menu interactions succeeding.
+The final full Windows CI runs on Python 3.12 and 3.13 each passed all 331 Python tests without skips and all 32 JavaScript tests. The local targeted suite passed 51 tests. After a production launcher restart, four unchanged combinations and four switch directions showed the complete interface by **15.115–35.318 seconds**, with all subsequent menu interactions succeeding.
 
 | Category | Backend stage | Complete-interface observation upper bound |
 | --- | ---: | ---: |
-| Native, whale, purge and both: unchanged launches | 1.011–3.018 s | 18.003–25.758 s |
-| Four combination-switch directions | 2.863–10.667 s | 19.304–31.763 s |
+| Native, whale, purge and both: unchanged launches | 0.970–2.643 s | 15.115–35.318 s |
+| Four combination-switch directions | 3.108–9.865 s | 18.276–32.973 s |
 
 These are single samples for each final-code scenario, not universal maximums. The previous strict-limit failure (native to purge still loading at 31.098 seconds) remains recorded. Earlier backend measurements of 189.297 seconds for a 0.3.1 whale disable and 76.580 seconds for initial purge cache construction are historical, not current routine window times.
 
