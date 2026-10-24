@@ -513,15 +513,15 @@ class VersionPlanTests(unittest.TestCase):
                 planner.execute(plan)
             replay.assert_not_called()
 
-    def test_preflight_branches_share_reads_but_execution_rehashes_disk(self):
+    def test_uncached_preflight_shares_reads_but_execution_rehashes_disk(self):
         self.record()
-        with patch('file_view.file_hash', wraps=file_hash) as read:
+        with patch.object(self.manager, 'verification_cache', None), patch('file_view.file_hash', wraps=file_hash) as read:
             plan = self.prepare([])
             calls = [call for call in read.call_args_list if call.args[0] == self.app / 'main.js']
             self.assertEqual(len(calls), 1)
             SwitchPlan(self.manager.tracking).execute(plan)
             calls = [call for call in read.call_args_list if call.args[0] == self.app / 'main.js']
-            self.assertEqual(len(calls), 2)  # Input recheck; the final file is parked.
+            self.assertEqual(len(calls), 3)  # Independent input recheck and move validation.
 
     def test_snapshot_metadata_is_deduplicated_and_detects_corruption(self):
         tracker = self.manager.tracking

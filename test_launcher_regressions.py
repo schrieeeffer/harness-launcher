@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
@@ -62,6 +63,79 @@ class ManagerRegressionTests(unittest.TestCase):
             self.assertFalse(server.mutation_lock.locked())
             self.assertIsNone(request('operations')['current'])
         request('scheme', {'name': 'still usable', 'selection': []})
+
+    def test_mutation_is_finished_before_any_response_bytes_are_sent(self):
+        server, _, request = self.service()
+        observations = []
+        send_response = launcher.Handler.send_response
+
+        def observe(handler, *args, **kwargs):
+            observations.append((server.mutation_lock.locked(), server.operations.snapshot()['current']))
+            return send_response(handler, *args, **kwargs)
+
+        with patch.object(launcher.Handler, 'send_response', new=observe):
+            request('scheme', {'name': 'saved', 'selection': []})
+            for path, body in (('', {}), ('scheme', {'name': '', 'selection': []}), ('unknown', {})):
+                with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as caught:
+                    request(path, body)
+                json.load(caught.exception)
+            server.stopping.set()
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                request('scheme', {'name': 'stopped', 'selection': []})
+            json.load(caught.exception)
+        self.assertEqual(observations, [(False, None)] * 5)
+
+    def test_slow_response_delivery_does_not_hold_mutation_lock(self):
+        server, _, request = self.service()
+        delivering, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        send_reply = launcher.Handler.send_reply
+        failures = []
+
+        def hold_first(handler, code, body, mime):
+            if not delivering.is_set():
+                delivering.set()
+                if not release.wait(5):
+                    raise TimeoutError('test did not release response delivery')
+            return send_reply(handler, code, body, mime)
+
+        def first_request():
+            try:
+                request('scheme', {'name': 'first', 'selection': []})
+            except Exception as exc:
+                failures.append(exc)
+
+        with patch.object(launcher.Handler, 'send_reply', new=hold_first):
+            worker = threading.Thread(target=first_request)
+            worker.start()
+            try:
+                self.assertTrue(delivering.wait(2))
+                self.assertFalse(server.mutation_lock.locked())
+                self.assertIsNone(server.operations.snapshot()['current'])
+                request('scheme', {'name': 'second', 'selection': []})
+            finally:
+                release.set()
+                worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertIn('second', self.manager.settings['schemes'])
+
+    def test_bookkeeping_failure_still_releases_mutation_lock(self):
+        server, _, _ = self.service()
+        handler = object.__new__(launcher.Handler)
+        handler.server = server
+        handler.path = '/api/scheme'
+        handler.headers = {'Content-Length': '2', 'Content-Type': 'application/json'}
+        handler.authorized = Mock(return_value=True)
+        handler.read_request_body = Mock(return_value=b'{}')
+        handler.post = Mock(side_effect=lambda _: handler.reply(200, {'message': 'committed'}))
+        handler.send_reply = Mock()
+        with patch.object(server.operations, 'finish', side_effect=RuntimeError('bookkeeping failed')):
+            with self.assertRaisesRegex(RuntimeError, 'bookkeeping failed'):
+                handler.do_POST()
+        self.assertFalse(server.mutation_lock.locked())
+        self.assertFalse(handler.defer_response)
+        handler.send_reply.assert_not_called()
 
     def test_malformed_backup_rows_do_not_break_the_backup_browser(self):
         backup = self.manager.backup(self.raw, self.original['dsh']['profile']['bundles'], 'fixture')

@@ -2,6 +2,8 @@
 
 [简体中文](launch-progress.md) · [Full feature tour](feature-tour.en.md) · [User guide](../README.en.md)
 
+See [0.3.2 switch performance](switch-performance.en.md) for the subsequent fix for launches after changing plugin switches. The measurements and screenshots below describe 0.3.1.
+
 ## Switches and Apply without launching
 
 Switches edit a pending combination so that several plugins can be selected together. **Launch Harness** applies changes automatically and starts Harness. **Apply without launching** (仅应用，不启动) synchronizes configuration and patches in advance while keeping Harness closed; an empty selection displays **Restore without launching** (仅还原，不启动). Saving a scheme only saves its name and selection.

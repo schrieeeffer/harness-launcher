@@ -5,6 +5,7 @@ Package contents are recovery artifacts, never executed by this module.
 from __future__ import annotations
 
 import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
 import re
@@ -19,12 +20,16 @@ NAME = re.compile(r'^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$')
 
 
 class VersionStore:
-    def __init__(self, profile, executable, content_store, host_archive):
+    def __init__(self, profile, executable, content_store, host_archive, verification_cache=None):
         self.profile = Path(profile)
         self.executable = Path(executable)
         self.store = content_store
         self.host_archive = host_archive
         self.view = None
+        self.verification_cache = verification_cache
+
+    def hash(self, path):
+        return self.verification_cache.hash(path, file_hash) if self.verification_cache else file_hash(path)
 
     @contextmanager
     def read_view(self, view):
@@ -42,10 +47,13 @@ class VersionStore:
         """Capture installed code, not user data; reject ambiguous nested links."""
         result = {}
         def visit(directory):
-            for child in sorted(directory.iterdir()):
+            with os.scandir(directory) as scanned:
+                children = sorted(scanned, key=lambda entry: entry.name)
+            for scanned in children:
+                child = Path(scanned.path)
                 if directory == root and child.name == 'node_modules' and child.is_dir():
                     continue  # Dependency edges are captured explicitly below.
-                info = child.lstat()
+                info = scanned.stat(follow_symlinks=False)
                 if getattr(info, 'st_file_attributes', 0) & 0x400 or stat.S_ISLNK(info.st_mode):
                     raise PatchError('插件代码含嵌套链接，无法建立完整版本记录：' + str(child))
                 key = child.relative_to(root).as_posix()
@@ -54,7 +62,7 @@ class VersionStore:
                     visit(child)
                 elif stat.S_ISREG(info.st_mode):
                     stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-                    digest = self.store.store_file(child, stamp) if store else file_hash(child)
+                    digest = self.store.store_file(child, stamp) if store else self.hash(child)
                     now = child.stat()
                     if [now.st_size, now.st_mtime_ns, now.st_ctime_ns] != stamp:
                         raise PatchError('插件代码仍在变化，版本记录未保存：' + str(child))
@@ -139,7 +147,7 @@ class VersionStore:
                 if path.is_file():
                     info = path.stat()
                     stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-                    result['installMetadata'][name] = self.store.store_file(path, stamp) if store else file_hash(path)
+                    result['installMetadata'][name] = self.store.store_file(path, stamp) if store else self.hash(path)
         return result
 
     def host_dependency(self, name):
@@ -156,8 +164,8 @@ class VersionStore:
         if meta.get('name') != name:
             raise PatchError('Harness 依赖名称不匹配：' + name)
         return {'providedBy': 'harness', 'name': name, 'version': meta['version'], 'manifestHash': sha(content),
-                'hostHash': file_hash(self.executable),
-                'archiveHash': self.view.hash(archive) if self.view else file_hash(archive)}
+                'hostHash': self.hash(self.executable),
+                'archiveHash': self.view.hash(archive) if self.view else self.hash(archive)}
 
     @staticmethod
     def adapter_patch(state):
@@ -169,12 +177,13 @@ class VersionStore:
             'version': state['pluginVersion'], 'package': package, 'patch': self.adapter_patch(state)})
         return dict(state, package=package, revision=revision)
 
-    def verify_adapter(self, state, adapter):
+    def verify_adapter(self, state, adapter, *, installed=True):
         revision = self.store.read_object(state['revision'])
         if (revision.get('adapter') != adapter or revision['package'] != state['package']
                 or revision['patch'] != self.adapter_patch(state)):
             raise PatchError('内置补丁记录与不可变版本不一致。')
-        self.verify_package(adapter, state['package'])
+        if installed:
+            self.verify_package(adapter, state['package'])
 
     def package_snapshot(self, name, source=''):
         capsule = self.capture(name, source)

@@ -45,7 +45,8 @@ class PluginTracking:
         self._process = None
         self._quiet = None
         self.store = ContentStore(self.root)
-        self.versions = VersionStore(manager.profile, Path(manager.settings['executable']), self.store, self.core.archive_source)
+        self.versions = VersionStore(manager.profile, Path(manager.settings['executable']), self.store, self.core.archive_source,
+                                    manager.verification_cache)
         self.core.bind_versions(self.versions)
         resources = self.core.resources
         home = manager.home
@@ -286,6 +287,39 @@ class PluginTracking:
         SwitchPlan(self).recover()
         self.verify_idle(check_files=check_files)
 
+    def check_host_identity(self, selection=(), value=None):
+        """Reject a changed host before scanning layers or creating backups.
+
+        This is an early rejection only: matching anchors never approve a
+        switch, replace a baseline, or bypass the independent commit checks.
+        Hash caches still require fresh NTFS identities on every lookup.
+        A new version string is not evidence of an authentic official update.
+        """
+        value = self.load() if value is None else value
+        hosts = {record['hostHash'] for name, record in value['records'].items()
+                 if (record['enabled'] or name in selection) and record.get('hostHash')}
+        combination = (self.read_object(value['currentCombination'])
+                       if value.get('currentCombination') else None)
+        if combination:
+            hosts.add(combination['hostHash'])
+        core_state = self.core.load()
+        archive_hash = core_state['archiveHash'] if core_state else None
+        archive = self.core.official_archive() if core_state else self.core.archive
+        if not core_state and combination:
+            # A generic recorded plugin may legitimately patch app.asar. Use
+            # the sealed active combination, not its unpatched native base.
+            entry = combination['state'].get('archive|.')
+            archive_hash = entry['hash'] if entry and entry['type'] == 'file' else None
+        def reject(component):
+            raise TrackingError('Harness 宿主文件已变化，可能发生了官方更新或手动修改；旧版本补丁记录不能直接用于当前安装。',
+                code='host_identity_changed', details={'components': [component]},
+                recovery='若刚更新 Harness，请保留旧记录，在新版本的干净安装上重新记录兼容插件；不要用旧快照覆盖新版文件。')
+        if hosts and hosts != {self.versions.hash(Path(self.manager.settings['executable']))}:
+            reject('executable')  # No reason to hash a large new ASAR as well.
+        if archive_hash:
+            if archive is None or self.versions.hash(archive) != archive_hash:
+                reject('officialArchive')
+
     def verify_idle(self, check_files=False):
         """Read-only inspection; never recover a transaction as a side effect."""
         if (self.root / 'switch.json').exists():
@@ -293,6 +327,8 @@ class PluginTracking:
         value = self.load()
         if self.busy or value.get('session'):
             raise TrackingError('安装记录尚未完成，请等待自动保存；如有异常，请先处理，原始快照会保留。')
+        if check_files:
+            self.check_host_identity(value=value)
         if check_files and value.get('inventory'):
             expected = self.read_object(value['inventory'])
             actual = self.metadata()
@@ -331,7 +367,7 @@ class PluginTracking:
         for name, record in records.items():
             if (record['enabled'] or name in selection) and record.get('hostHash'):
                 if host_hash is None:
-                    host_hash = file_hash(Path(self.manager.settings['executable']))
+                    host_hash = self.versions.hash(Path(self.manager.settings['executable']))
                 if host_hash != record['hostHash']:
                     raise TrackingError('Harness 程序已更新，不能使用旧版本的文件记录：' + name)
 

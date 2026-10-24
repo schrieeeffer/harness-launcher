@@ -615,7 +615,7 @@ class GenericTrackingTests(unittest.TestCase):
         self.accept()
         raw = self.manifest.read_bytes()
         self.exe.write_bytes(b'new application version')
-        with self.assertRaisesRegex(MenuError, 'Harness 程序已更新'):
+        with self.assertRaisesRegex(MenuError, 'Harness 宿主文件已变化'):
             self.apply([])
         self.assertEqual(self.manifest.read_bytes(), raw)
 

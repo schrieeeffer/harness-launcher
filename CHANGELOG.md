@@ -1,8 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 — 2026-10-24
 
-### 0.3.1 launch progress and unchanged-combination performance
+### Plugin-switch verification performance
+
+- Check recorded executable/archive identities before backups and large directory scans. Report `host_identity_changed` for possible updates or manual replacements; identical-content replacement and legitimate recorded generic ASAR patches remain accepted by this early filter. Refuse cross-version transaction rollback and retain recovery artifacts. Automatic patch migration across Harness releases is not implemented.
+- Add disposable directory checkpoints guarded by continuous unprivileged NTFS USN records and stable root identities. Reuse an unchanged verified tree across purge directory moves; journal gaps, unsupported records and internal edits fall back to complete verification.
+- Establish checkpoints with exclusive data reads and explicit per-entry USN CLOSE barriers, including protection against attribute-only handles retaining a coalesced change cycle. Reject experimental tree-cache format 1; retain immutable baselines, delta objects and transaction rollback separately.
+- Finish operation bookkeeping and release the mutation lock before sending HTTP responses. Slow or disconnected clients no longer occupy the request lock after a completed mutation; bookkeeping exceptions also release it. Add deterministic ordering and concurrency regressions.
+- Reuse bounded path/child-index projections and fingerprints only after fresh directory checkpoint validation. Keep virtual changes isolated, and derive the committed inventory from the independently verified output snapshot rather than adopting a later metadata scan.
+- Final local regression run: 328 Python tests (326 passed, two symbolic-link privilege skips) and 32 JavaScript tests passed. Eight production launches after restarting the launcher showed the full interface by 18.003–31.763 seconds; menus responded in subsequent checks. This meets the user-approved approximate local target, not a strict 30-second guarantee. Prior strict-limit failures remain in the published data.
+- Avoid traversing inactive adapter trees when ordinary plugins change and the built-in adapter remains native. Validate immutable adapter metadata and active native files, and verify the complete parked tree again before enabling the adapter.
+- Reuse a sealed native baseline only after freshly computed active contents, host and archive identities match. Avoid redundant ASAR member parsing and unused baseline-copy reads; all blobs actually needed for replay or rollback are still verified.
+- Add configuration-only transactions for recorded plugins with empty file deltas; validate the current sealed contents before changing only the bundle list.
+- Hash independent files with up to 32 workers. On local NTFS, reuse verified contents only when volume/file identity, creation time, write time, ChangeTime and size match. Unsupported metadata falls back to full reads; corrupt optional caches are discarded. Commit checks and serialized writes/rollback remain in place.
+- Keep one cached version per file identity and cap the optional cache at 100,000 entries. Repeated edits discard obsolete fingerprints without deleting application files or recovery objects. Directory-tree fingerprints are reused only within unchanged planning overlays.
+- Require data-read access, not attribute-only access, to exclude writers during NTFS cache validation; reject legacy cache format 1 and rebuild format 2. Verify existing-writer fallback and same-size/restored-mtime edits in isolated tests.
+- Reindex only moved subtrees in the planning overlay, preserving unrelated directory indexes and empty directories.
+- Publish 31 isolated-data feature screenshots, embedded Markdown, architecture and verification diagrams, host-update guidance and measured startup data; see `docs/validation-0.3.2.md`. Actual private Harness conversation screenshots are excluded.
+- Count every file in the current verification scope, show separate labels for planning and commit checks, and report move validation separately. A completed live-file count no longer masks a long unreported parked-tree scan.
+- Added concurrent-read, inactive-tree isolation, native-switch rollback and corruption regressions. See `docs/switch-performance.md` for measurements and limits.
+
+## 0.3.1
+
+### Launch progress and unchanged-combination performance
 
 - Renamed Apply to `仅应用，不启动` (Apply without launching), clarified that switches edit a draft, and made it explicit that Launch applies changes automatically.
 - Added a blue-purple progress bar with stage labels, actual file/change counts and elapsed time. Progress remains readable independently of the manager lock, adapts to narrow windows and respects reduced motion. Launch/apply requests no longer time out merely because five minutes have elapsed; writes are never automatically retried.

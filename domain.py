@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import PurePosixPath
 import re
 from typing import Mapping
@@ -47,6 +48,13 @@ def relative_path(value, *, allow_root=False):
     """Reject both traversal and Windows filename aliases before joining paths."""
     if not isinstance(value, str) or not value:
         raise DomainError('路径必须是非空字符串。')
+    return _relative_path(value, bool(allow_root))
+
+
+@lru_cache(maxsize=32768)
+def _relative_path(value, allow_root):
+    # This caches syntax validation of immutable strings only. Filesystem
+    # existence, ancestry, identities and contents must still be checked live.
     path = PurePosixPath(value)
     if (path.is_absolute() or '..' in path.parts or str(path) != value
             or '\\' in value or ':' in value or value == '.' and not allow_root):

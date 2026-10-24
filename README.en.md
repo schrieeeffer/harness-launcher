@@ -12,7 +12,7 @@ Choose which plugins to load on each launch, discover official and community plu
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.3.1%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.3.2%20preview-orange.svg)
 
 [简体中文](README.md) · **English**
 
@@ -27,6 +27,10 @@ Choose which plugins to load on each launch, discover official and community plu
 
 - [Updated feature tour and verification screenshots](docs/feature-tour.en.md)
 - [0.3.1 launch progress, button labels and performance verification](docs/launch-progress.en.md)
+- [0.3.2 verification performance when switching plugins](docs/switch-performance.en.md)
+- [0.3.2 measurements and the approximate 30-second target](docs/validation-0.3.2.md)
+- [0.3.2 feature screenshots and walkthrough (Chinese)](docs/feature-tour-0.3.2.md)
+- [Harness updates and patch conflicts (Chinese)](docs/host-updates.md)
 - [Why it exists](#why-it-exists)
 - [Features](#features)
 - [Getting started](#getting-started)
@@ -215,14 +219,20 @@ The launch panel has three buttons:
 - **Apply without launching** (仅应用，不启动): synchronize configuration and patches in advance. With no extra plugins selected, the label becomes **Restore without launching** (仅还原，不启动). You do not need to press this before Launch.
 - **Save as scheme** (保存为方案): save the selection without modifying Harness.
 
-When launching an unchanged, previously saved combination, the launcher freshly verifies active files, package dependencies and the host version, then starts Harness without redundant undo, replay or backups. Actual content changes still block launch. When a combination needs switching, the launcher:
+When launching an unchanged, previously saved combination, the launcher verifies active files, package dependencies and the host version, then starts Harness without redundant undo, replay or backups. Actual content changes still block launch.
+
+0.3.2 excludes unused parked trees and uses configuration-only transactions for recorded plugins with empty file deltas. Local NTFS file-identity caches and directory checkpoints guarded by continuous USN records reuse verified indexes across unchanged purge directory moves. First use, internal edits or unavailable journal evidence require complete verification. Obsolete fingerprints are removed and capacity is bounded; replay and rollback blobs remain checked. Request locks are released before response delivery. See [measurements and scope](docs/switch-performance.en.md).
+
+**0.3.2 has completed local validation against the approximate 30-second target.** Full regression: 326 Python passes, two skips and 32 JavaScript passes. After restarting the production launcher, eight scenarios showed the complete interface by 18.003–31.763 seconds; later menu interactions all succeeded. These observations are upper bounds, not a strict 30-second guarantee. Historical failures remain in the [validation record](docs/validation-0.3.2.md). Changed host identities stop obsolete patch application early while retaining recovery records; see [updates and conflicts](docs/host-updates.md).
+
+When a file combination needs switching, the launcher:
 
 1. Checks that Harness, including its tray icon, has fully exited, that the executable path is valid, and that no install recording is in progress. **It never forcibly ends a running session.**
 2. Checks that `package.json` has not been changed by Harness or another program since it was read. If it has, you are asked to refresh and try again; external edits are never overwritten.
-3. Backs up `package.json`.
+3. Checks recorded host executable/archive identities first, stopping on possible updates; then backs up `package.json`.
 4. Computes the new bundle list. Official components are always kept, existing plugins keep their load order, and newly enabled plugins are appended. All other fields of `package.json` are preserved.
 5. Simulates the entire switch in a read-only view, verifying bidirectional copies, the native base, plugin dependencies and target files, then rechecks inputs. One transaction undoes current layers, switches the adapter and configuration, applies target layers and verifies the final result. Failed preflight leaves live files untouched.
-6. If you chose to launch, starts Harness with `DSH_HOME` pointing at the current data directory. If any step fails, everything rolls back to the state before the switch.
+6. If you chose to launch, rechecks host identity and starts Harness with `DSH_HOME` pointing at the current data directory. Transaction failures attempt rollback; changed host versions or invalid recovery preconditions stop overwrites and retain the journal and recovery objects.
 
 The status line shows whether the selection is current, pending, blocked by a running Harness or missing executable, or being processed. Launch and apply operations also show a blue-purple progress bar with actual stages, file or change counts, and elapsed time. Uncounted stages use a waiting animation; the bar does not estimate remaining time. See the [0.3.1 screenshots and measurements](docs/launch-progress.en.md).
 

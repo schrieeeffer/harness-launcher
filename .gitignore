@@ -12,6 +12,8 @@ preview*.png
 Thumbs.db
 instance.json
 instance.lock
+verification-cache.json
+verification-trees.json
 settings.json
 patches/
 backups/

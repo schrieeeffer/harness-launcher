@@ -3,7 +3,7 @@ from dataclasses import replace
 import unittest
 
 from domain import (ContentIdentity, DomainError, ManagedPath, SnapshotEntry,
-                    SnapshotMetadata, validate_changes, validate_snapshot)
+                    SnapshotMetadata, relative_path, validate_changes, validate_snapshot)
 from recording_state import (RecordingEvent as Event, RecordingPhase as Phase,
                              RecordingSession, RunState, validate_registry)
 
@@ -71,6 +71,13 @@ class DomainTests(unittest.TestCase):
         for target in ('bad\x00target', '', None, 123):
             with self.subTest(target=target), self.assertRaises(DomainError):
                 validate_snapshot({'app|link': ['link', target]})
+
+    def test_cached_path_syntax_keeps_root_permission_and_type_validation(self):
+        self.assertEqual(str(relative_path('.', allow_root=True)), '.')
+        for value in ('.', [], {}, None, 123, 'ok/../outside', 'ok/COM1.txt'):
+            with self.subTest(value=value), self.assertRaises(DomainError):
+                relative_path(value)
+        self.assertEqual(str(relative_path('ok/file.txt')), 'ok/file.txt')
 
     def test_snapshot_metadata_rejects_non_objects_at_decode_boundary(self):
         for value in (None, [], 'metadata', 1):

@@ -395,52 +395,72 @@ class PatchModes:
             self.save(state)
         return state
 
-    def verify_files(self, state, view=None):
-        """Verify both live and parked adapter files without creating objects."""
+    def verify_files(self, state, view=None, *, preserve_native=False):
+        """Verify adapter inputs; dormant files matter only when using them."""
         official = self.official_archive(view)
         if official is None or (view.hash(official) if view else file_hash(official)) != state['archiveHash']:
             raise PatchError('Harness 官方归档已更新或被修改，已停止使用旧补丁快照。')
-        app_at = self.app if (view.exists(self.app) if view else self.app.exists()) else self.stash / 'app'
-        if tree_hash(app_at, view, content=True) != state['treeContentHash']:
-            raise PatchError('补丁目录有新改动或其他插件写入，已停止切换以保护这些修改。')
+        if preserve_native:
+            if (state['mode'] != 'native' or official != self.archive
+                    or (view.exists(self.app) if view else self.app.exists())):
+                raise PatchError('当前安装不符合原生文件布局，未跳过内置补丁预检。')
+        else:
+            app_at = self.app if (view.exists(self.app) if view else self.app.exists()) else self.stash / 'app'
+            if tree_hash(app_at, view, content=True) != state['treeContentHash']:
+                raise PatchError('补丁目录有新改动或其他插件写入，已停止切换以保护这些修改。')
         for item in state['files']:
             actual = (view.hash(Path(item['path'])) if view else file_hash(Path(item['path'])))
             expected = item['native'] if state['mode'] == 'native' else item['initial'] if state['mode'] == 'captured' else item['plugin']
             if actual != expected:
                 raise PatchError('插件注入文件已被修改，需重新建立快照：' + item['path'])
-        for item in state['directories']:
+        directories = () if preserve_native else state['directories']
+        for item in directories:
             at = Path(item['parked'] if state['mode'] == 'native' else item['active'])
             if tree_hash(at, view, content=True) != item['contentHash']:
                 raise PatchError('插件预设已被修改，未覆盖现有预设。')
         return official
 
-    def prepare(self, selection, plugins, before, after, strict_native=False, view=None):
+    def verify_native_config(self, plugins, view=None):
+        unknown = [p['id'] for p in plugins if p['id'] != self.adapter.plugin]
+        if unknown:
+            raise PatchError('这些插件尚未接入补丁还原，无法保证原生模式：' + '、'.join(unknown))
+        for filename in ['cordis.yml', 'cordis.patch.yml']:
+            path = self.context.profile / filename
+            if not (view.is_file(path) if view else path.is_file()):
+                continue
+            source = '\n'.join(line for line in (view.read_bytes(path).decode('utf-8-sig') if view else path.read_text(encoding='utf-8-sig')).splitlines()
+                               if not line.lstrip().startswith('#'))
+            names = re.findall(r'''(?m)^\s*(?:-\s*)?name:\s*["']?([^\s"'#]+)''', source)
+            if '!!js' in source or any(not name.startswith('@deepseek-ai/') for name in names):
+                raise PatchError('用户 YAML 配置包含额外插件或动态表达式，无法验证原生模式：' + filename)
+
+    def prepare(self, selection, plugins, before, after, strict_native=False, view=None, *, preserve_native=False):
         state = self.load()
         purge = next((p for p in plugins if p['id'] == self.adapter.plugin), None)
-        unknown = [p['id'] for p in plugins if p['id'] != self.adapter.plugin]
-        if strict_native and unknown:
-            raise PatchError('这些插件尚未接入补丁还原，无法保证原生模式：' + '、'.join(unknown))
         if strict_native:
-            for filename in ['cordis.yml', 'cordis.patch.yml']:
-                path = self.context.profile / filename
-                if not (view.is_file(path) if view else path.is_file()):
-                    continue
-                source = '\n'.join(line for line in (view.read_bytes(path).decode('utf-8-sig') if view else path.read_text(encoding='utf-8-sig')).splitlines()
-                                   if not line.lstrip().startswith('#'))
-                names = re.findall(r'''(?m)^\s*(?:-\s*)?name:\s*["']?([^\s"'#]+)''', source)
-                if '!!js' in source or any(not name.startswith('@deepseek-ai/') for name in names):
-                    raise PatchError('用户 YAML 配置包含额外插件或动态表达式，无法验证原生模式：' + filename)
+            self.verify_native_config(plugins, view)
         if not state and not purge:
             if strict_native and (view.exists(self.app) if view else self.app.exists()):
                 raise PatchError('存在未受管理的 resources/app，无法验证原生状态。')
             return None
         if not state:
             state = self.capture(plugins, view=view, persist=False)
-        self._versions().verify_adapter(state, self.adapter.plugin)
         desired = 'plugin' if self.adapter.plugin in selection else 'native'
+        if preserve_native and (state['mode'] != 'native' or desired != 'native'):
+            raise PatchError('只有保持原生内置层时才能跳过暂存目录。')
+        # An inactive adapter's installed code is not executed or restored by a
+        # generic switch. Its immutable metadata remains checked; enabling it
+        # still verifies the complete package and both live/parked trees.
+        self._versions().verify_adapter(state, self.adapter.plugin, installed=not preserve_native)
         if purge and purge['version'] != state['pluginVersion']:
             raise PatchError('dsh-purge 已升级，旧补丁快照已停用。需在新版本上重新建立快照。')
-        official = self.verify_files(state, view)
+        official = self.verify_files(state, view, preserve_native=preserve_native)
+        if preserve_native:
+            manifest = self.context.manifest_path
+            if (view.read_bytes(manifest) if view else manifest.read_bytes()) != before:
+                raise PatchError('配置在校验期间被更改，请刷新后重试。')
+            operations = [self.file_op(manifest, after, view)] if before != after else []
+            return {'previous': state, 'state': state, 'operations': operations, 'mode': 'native'}
         operations = []
         if desired == 'native':
             if (view.exists(self.app) if view else self.app.exists()):

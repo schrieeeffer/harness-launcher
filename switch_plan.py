@@ -15,7 +15,7 @@ from domain import digest, object_reference
 from operation_models import OperationError, decode_operation, validate_operations
 from recording_state import validate_registry
 from operations import report_progress
-from patch_modes import PatchError, archive_info, file_hash, put, tree_hash
+from patch_modes import PatchError, archive_info, file_hash, put
 
 
 class SwitchPlan:
@@ -26,9 +26,14 @@ class SwitchPlan:
         self.journal = tracker.root / 'switch.json'
         self.hashes = hashes
 
-    def roots(self):
+    def file_view(self, roots, hashes=None):
+        return FileView(roots, hashes, self.manager.verification_cache)
+
+    def roots(self, *, include_dormant=True):
         roots = list(self.tracker.scopes.values())
-        roots += [self.manager.manifest_path, *self.core.extra_roots()]
+        roots.append(self.manager.manifest_path)
+        if include_dormant:
+            roots += self.core.extra_roots()
         return roots
 
     def verify_current(self, selection, plugins, manifest):
@@ -36,7 +41,8 @@ class SwitchPlan:
 
         Dormant adapter trees and rollback blobs are not executed on this path.
         They are still fully checked whenever a switch needs them. Active files,
-        packages and the host are freshly hashed, including same-metadata edits.
+        packages and the host are verified; NTFS identities invalidate cached
+        contents even for same-size edits with a restored modification time.
         """
         self.tracker.verify_idle()
         old = self.tracker.load()
@@ -58,7 +64,7 @@ class SwitchPlan:
         if any(p['id'] not in registered and p['id'] != self.core.adapter.plugin for p in plugins):
             return False
         report_progress('packages', '校验已启用插件及依赖')
-        host = file_hash(Path(self.manager.settings['executable']))
+        host = self.tracker.versions.hash(Path(self.manager.settings['executable']))
         lock = self.tracker.versions.lock(selection, plugins, old, host)
         if any(combination.get(key) != value for key, value in lock.items()):
             raise PatchError('当前组合的版本记录已变化，请刷新并重新应用选择。')
@@ -68,7 +74,7 @@ class SwitchPlan:
                 return False
             self.tracker.versions.verify_adapter(core_state, self.core.adapter.plugin)
         report_progress('files', '校验当前组合文件')
-        view = FileView(self.tracker.scopes.values())
+        view = self.file_view(self.tracker.scopes.values())
         actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes,
             progress=lambda done, total: report_progress('files', '校验当前组合文件', done, total)))
         if actual != combination['state']:
@@ -78,7 +84,7 @@ class SwitchPlan:
         self.manager.require_stopped()
         if (self.manager.manifest_path.read_bytes() != manifest or self.tracker.load() != old
                 or self.core.load() != core_state
-                or file_hash(Path(self.manager.settings['executable'])) != host):
+                or self.tracker.versions.hash(Path(self.manager.settings['executable'])) != host):
             raise PatchError('校验期间配置或版本记录发生变化，请刷新后重试。')
         return True
 
@@ -158,23 +164,79 @@ class SwitchPlan:
             self.tracker.blob_bytes(entry['hash'])
 
     def prepare(self, selection, plugins, before, after, native):
-        report_progress('files', '扫描当前与暂存补丁文件')
+        report_progress('files', '扫描本次切换涉及的文件')
         self.manager.require_stopped()
         self.manager.require_executable()
         old = self.tracker.load()
         previous_core = self.core.load()
-        view = FileView(self.roots(), self.hashes)
+        config_plan = self._configuration_plan(selection, plugins, before, after, old, previous_core)
+        if config_plan is not None:
+            if native:
+                self.core.verify_native_config([p for p in plugins if p['id'] not in old['records']])
+            return config_plan
+        preserve_native = bool(previous_core and previous_core['mode'] == 'native'
+                               and self.core.adapter.plugin not in selection)
+        view = self.file_view(self.roots(include_dormant=not preserve_native), self.hashes)
+        view.hash_files(progress=lambda done, total: report_progress('files', '校验本次切换涉及的文件', done, total))
         with self.tracker.versions.read_view(view):
-            return self._prepare(selection, plugins, before, after, native, old, previous_core, view)
+            return self._prepare(selection, plugins, before, after, native, old, previous_core, view, preserve_native)
 
-    def _prepare(self, selection, plugins, before, after, native, old, previous_core, view):
+    def _configuration_plan(self, selection, plugins, before, after, old, core_state):
+        """Plan a bundle-only edit; verify the sealed live state at execution.
+
+        A recorded plugin with an empty file delta needs no layer replay. The
+        existing combination is only an expectation here, never proof of today's
+        files. execute() freshly verifies it before the manifest can be written.
+        """
+        reference = old.get('currentCombination')
+        if not reference or before == after:
+            return None
+        current = self.tracker.read_object(reference)
+        previous_selection = current['selection']
+        changed = set(selection) ^ set(previous_selection)
+        if (self.core.adapter.plugin in changed
+                or current['manifestHash'] != hashlib.sha256(before).hexdigest()
+                or any(name not in old['records'] for name in changed)):
+            return None
+        if any(self.tracker.read_object(old['records'][name]['delta'])['changes'] for name in changed):
+            return None
+        # Only bundle membership may differ; the normal planner handles every
+        # other edit and all changes to the built-in adapter.
+        previous_json, target_json = json.loads(before), json.loads(after)
+        previous_json['dsh']['profile']['bundles'] = target_json['dsh']['profile']['bundles']
+        if previous_json != target_json:
+            return None
+        view = self.file_view([self.manager.manifest_path])
+        expected = self._signature(view)
+        operations = []
+        self._core(view, {'operations': [self.core.file_op(self.manager.manifest_path, after, view)]}, operations)
+        new = copy.deepcopy(old)
+        for name, record in new['records'].items():
+            record['enabled'] = name in selection
+        lock = self.tracker.versions.lock(selection, plugins, old, current['hostHash'])
+        combination = {**lock, 'baseline': current['baseline'], 'state': current['state'],
+                       'manifestHash': self.core.blob(after),
+                       'bundles': target_json['dsh']['profile']['bundles'],
+                       'adapterRevision': current['adapterRevision']}
+        reference = self.tracker.versions.object('combinations', combination)
+        new['currentCombination'] = reference
+        if reference not in new.setdefault('combinations', []):
+            new['combinations'].append(reference)
+        plan = {'configurationOnly': True, 'operations': operations, 'previous': old, 'new': new,
+                'previousCore': core_state, 'inputCore': core_state, 'newCore': core_state,
+                'selection': list(selection), 'mode': 'plugin' if selection else 'native',
+                'expected': expected, 'target': current['state'], 'host': current['hostHash'],
+                'combination': reference}
+        self.validate(plan)
+        return plan
+
+    def _prepare(self, selection, plugins, before, after, native, old, previous_core, view, preserve_native=False):
         report_progress('files', '校验文件并预演插件组合')
         if old.get('inventory'):
             recorded = self.tracker.recorded_state(old)
             if recorded is not None:
                 expected = self.tracker.versions.content_state(recorded)
-                actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes,
-                    progress=lambda done, total: report_progress('files', '校验切换前文件', done, total)))
+                actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes))
                 changed = [key for key in set(expected) | set(actual) if expected.get(key) != actual.get(key)]
                 if changed:
                     raise PatchError('记录窗口外发生了文件内容变化，未开始切换：' + '、'.join(sorted(changed)[:4]))
@@ -190,29 +252,46 @@ class SwitchPlan:
         self._generic(view, self.tracker.operations(old.get('supportDirectories', []), False), operations, '组合目录')
         registered = set(old['records'])
         core_plugins = [p for p in plugins if p['id'] not in registered]
+        report_progress('files', '推演原生基线与插件层')
         # Derive and preserve the native state from the same verified base, even
         # when the user is switching directly between two plugin combinations.
         native_view = copy.deepcopy(view)
-        native_plan = self.core.prepare([], core_plugins, before, before, True, native_view)
+        native_plan = self.core.prepare([], core_plugins, before, before, True, native_view,
+                                        preserve_native=preserve_native)
         self._core(native_view, native_plan, [])
         baseline_snapshot = native_view.snapshot(self.tracker.scopes)
         # app.asar.bak is a retained extra copy, not the active official base.
         baseline_state = self.tracker.versions.content_state({k: v for k, v in baseline_snapshot.items()
                                                              if not k.startswith('archive_backup|')})
-        host = file_hash(Path(self.manager.settings['executable']))
+        host = self.tracker.versions.hash(Path(self.manager.settings['executable']))
         baseline = {'format': 1, 'hostHash': host, 'state': baseline_state,
                     'officialArchive': native_plan['state']['archiveHash'] if native_plan else native_view.hash(self.core.archive)}
-        if native_view.is_file(self.core.archive):
-            baseline['archiveInfo'] = archive_info(self.core.archive, self.core.resources / 'app.asar.unpacked',
-                                                  verify=True, view=native_view)
-        baseline_ref = self.tracker.versions.object('baselines', baseline)
         previous_baseline = old.get('nativeBaselines', {}).get(host)
-        if previous_baseline and self.tracker.read_object(previous_baseline) != baseline:
+        previous_value = self.tracker.read_object(previous_baseline) if previous_baseline else None
+        reuse_baseline = bool(isinstance(previous_value, dict)
+                              and all(previous_value.get(key) == value for key, value in baseline.items()))
+        if native_view.is_file(self.core.archive):
+            if reuse_baseline and 'archiveInfo' in previous_value:
+                # Archive and unpacked bytes have just been hashed against the
+                # sealed baseline. Re-parsing every ASAR member proves nothing
+                # additional when the complete content identities are equal.
+                baseline['archiveInfo'] = previous_value['archiveInfo']
+            else:
+                report_progress('files', '验证官方归档内容')
+                baseline['archiveInfo'] = archive_info(self.core.archive, self.core.resources / 'app.asar.unpacked',
+                                                      verify=True, view=native_view)
+        if previous_baseline and previous_value != baseline:
             raise PatchError('原生基线与已有记录不同，未修改文件。请检查应用更新或记录之外的改动。')
-        report_progress('files', '校验官方归档与还原快照')
-        self._keep_baseline_blobs(native_view, baseline_snapshot)
+        baseline_ref = previous_baseline or self.tracker.versions.object('baselines', baseline)
+        if not reuse_baseline:
+            report_progress('files', '校验官方归档与还原快照')
+            self._keep_baseline_blobs(native_view, baseline_snapshot)
+        # Generic replay always verifies every blob it actually uses, including
+        # rollback bytes. Unused baseline backups are checked when needed.
+        report_progress('files', '生成并检查目标组合')
         new.setdefault('nativeBaselines', {})[host] = baseline_ref
-        core_plan = self.core.prepare(selection, core_plugins, before, after, native, view)
+        core_plan = self.core.prepare(selection, core_plugins, before, after, native, view,
+                                     preserve_native=preserve_native)
         self._core(view, core_plan, operations)
         if core_plan is None and before != after:
             # Route the plain manifest write through the same journal as layers.
@@ -233,8 +312,8 @@ class SwitchPlan:
         new['currentCombination'] = reference
         if reference not in new.setdefault('combinations', []):
             new['combinations'].append(reference)
-        # Hash the entire input, including parked adapter files. Rechecked before
-        # the first mutation; no timestamps are trusted as content validation.
+        # Hash every input this plan uses, including dormant trees when the
+        # adapter may change. Recheck independently before the first mutation.
         expected = self._signature(initial)
         plan = {'operations': operations, 'previous': old, 'new': new,
                 'previousCore': previous_core or (core_plan['previous'] if core_plan else None),
@@ -242,6 +321,8 @@ class SwitchPlan:
                 'inputCore': previous_core, 'selection': list(selection),
                 'mode': 'plugin' if selection else 'native', 'expected': expected, 'target': target,
                 'host': host, 'combination': reference}
+        if preserve_native:
+            plan['preserveNative'] = True
         self.validate(plan)
         return plan
 
@@ -253,6 +334,45 @@ class SwitchPlan:
             if plan.get('requiredFeatures', []) != []:
                 raise ValueError('Unsupported required transaction features')
             validate_operations(plan['operations'])
+            configuration_only = plan.get('configurationOnly', False)
+            if type(configuration_only) is not bool:
+                raise ValueError('Invalid configuration-only flag')
+            if configuration_only:
+                old_combo = self.tracker.read_object(plan['previous']['currentCombination'])
+                new_combo = self.tracker.read_object(plan['combination'])
+                changed = set(plan['selection']) ^ set(old_combo['selection'])
+                expected_registry = copy.deepcopy(plan['previous'])
+                for name, record in expected_registry['records'].items():
+                    record['enabled'] = name in plan['selection']
+                expected_registry['currentCombination'] = plan['combination']
+                if plan['combination'] not in expected_registry.setdefault('combinations', []):
+                    expected_registry['combinations'].append(plan['combination'])
+                if (plan['previousCore'] != plan['inputCore'] or plan['newCore'] != plan['inputCore']
+                        or plan['new'] != expected_registry
+                        or plan['host'] != old_combo['hostHash'] or new_combo['hostHash'] != plan['host']
+                        or new_combo['selection'] != plan['selection']
+                        or self.core.adapter.plugin in changed or plan['target'] != old_combo['state']
+                        or new_combo['state'] != old_combo['state'] or new_combo['baseline'] != old_combo['baseline']
+                        or new_combo['adapterRevision'] != old_combo['adapterRevision']
+                        or len(plan['operations']) != 1
+                        or set(plan['expected']) != {str(self.manager.manifest_path)}
+                        or any(name not in plan['previous']['records'] or
+                            self.tracker.read_object(plan['previous']['records'][name]['delta'])['changes']
+                            for name in changed)):
+                    raise ValueError('Configuration-only plan cannot change file layers')
+                op = plan['operations'][0]
+                if (op['engine'] != 'core' or op['kind'] != 'file' or op['path'] != str(self.manager.manifest_path)
+                        or op['before'] != old_combo['manifestHash'] or op['after'] != new_combo['manifestHash']):
+                    raise ValueError('Configuration-only plan must change only the manifest')
+            preserve_native = plan.get('preserveNative', False)
+            if type(preserve_native) is not bool:
+                raise ValueError('Invalid preserved adapter flag')
+            if preserve_native and (not plan['inputCore'] or plan['inputCore']['mode'] != 'native'
+                    or plan['inputCore'] != plan['newCore'] or plan['previousCore'] != plan['inputCore']
+                    or self.core.adapter.plugin in plan['selection']
+                    or any(op['engine'] == 'core' and (op['kind'] != 'file'
+                        or op['path'] != str(self.manager.manifest_path)) for op in plan['operations'])):
+                raise ValueError('Preserved adapter cannot execute adapter mutations')
             digest(plan['host'])
             object_reference(plan['combination'], 'combinations')
             if (not isinstance(plan['selection'], list)
@@ -303,10 +423,12 @@ class SwitchPlan:
             return
         if op['kind'] == 'move':
             at = Path(op['dest'] if undo else op['source'])
-            signature = tree_hash(at) if op['directory'] else file_hash(at)
+            view = self.file_view([at])
+            view.hash_files(progress=lambda done, total: report_progress('sync', '校验待移动的补丁文件', done, total))
+            signature = view.tree_hash(at) if op['directory'] else view.hash(at)
             if signature != op['fingerprint']:
                 raise PatchError('目录或归档在预检后改变，已停止切换：' + str(at))
-            content_signature = tree_hash(at, content=True) if op['directory'] else file_hash(at)
+            content_signature = view.tree_hash(at, content=True) if op['directory'] else view.hash(at)
             if content_signature != op['contentFingerprint']:
                 raise PatchError('目录或归档内容在预检后改变，已停止切换：' + str(at))
         self.core.replay([op], undo=undo)
@@ -330,10 +452,19 @@ class SwitchPlan:
         if self.tracker.load() != plan['previous'] or self.core.load() != plan['inputCore']:
             raise PatchError('预检后版本索引发生变化，未开始切换，请刷新重试。')
         _, obj, bundles = self.manager.manifest()
+        configuration_only = plan.get('configurationOnly', False)
+        if configuration_only:
+            previous = self.tracker.read_object(plan['previous']['currentCombination'])
+            if not self.verify_current(previous['selection'], self.manager.discover(obj, bundles),
+                                       self.core.bytes(previous['manifestHash'])):
+                raise PatchError('当前组合已变化，未修改加载配置，请刷新重试。')
         self.tracker.check_versions(self.manager.discover(obj, bundles), plan['selection'])
-        if file_hash(Path(self.manager.settings['executable'])) != plan['host']:
+        if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != plan['host']:
             raise PatchError('Harness 在预检后发生更新，未开始切换。')
-        if self._signature(FileView(self.roots())) != plan['expected']:
+        inputs = self.file_view([self.manager.manifest_path] if configuration_only else
+                          self.roots(include_dormant=not plan.get('preserveNative', False)))
+        inputs.hash_files(progress=lambda done, total: report_progress('sync', '独立复核切换输入', done, total))
+        if self._signature(inputs) != plan['expected']:
             raise PatchError('预检后文件发生变化，未开始切换，请刷新重试。')
         journal = {'format': 3, 'id': uuid.uuid4().hex, 'cursor': 0, 'committed': False,
                    'plan': self.tracker.versions.object('transactions', plan)}
@@ -345,14 +476,30 @@ class SwitchPlan:
                 journal['cursor'] = index + 1
                 put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
             report_progress('sync', '校验切换结果')
-            actual = self.tracker.versions.content_state(FileView(self.tracker.scopes.values()).snapshot(self.tracker.scopes,
-                progress=lambda done, total: report_progress('sync', '校验切换结果', done, total)))
+            # A configuration-only transaction never writes managed contents.
+            # Those were freshly verified above, just like an unchanged launch.
+            # Verify the only changed file; file-layer transactions still get
+            # their independent full result scan.
+            if configuration_only:
+                if file_hash(self.manager.manifest_path) != plan['operations'][0]['after']:
+                    raise PatchError('加载配置写入后校验失败。')
+                actual = plan['target']
+            else:
+                verified_snapshot = self.file_view(self.tracker.scopes.values()).snapshot(self.tracker.scopes,
+                    progress=lambda done, total: report_progress('sync', '校验切换结果', done, total))
+                actual = self.tracker.versions.content_state(verified_snapshot)
             if actual != plan['target']:
                 raise PatchError('切换后的文件未通过整套组合校验。')
             if plan['newCore']:
                 self.core.save(plan['newCore'])
-            if plan['new']['records']:
-                plan['new']['inventory'] = self.tracker.object('snapshots', self.tracker.metadata())
+            if plan['new']['records'] and not configuration_only:
+                # Bind the inventory to the independently verified output.
+                # Another directory walk adds latency and could adopt changes
+                # arriving after verification into the trusted metadata index.
+                inventory = {key: ['file', item['size'], item['mtime']] if item['type'] == 'file'
+                             else ['link', item['target']] if item['type'] == 'link' else ['dir']
+                             for key, item in verified_snapshot.items()}
+                plan['new']['inventory'] = self.tracker.object('snapshots', inventory)
             self.tracker.save(plan['new'])
             journal['committed'] = True
             put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
@@ -404,6 +551,10 @@ class SwitchPlan:
         if journal.get('committed'):
             self.journal.unlink()
             return
+        if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != plan['host']:
+            raise PatchError('Harness 宿主文件在事务期间发生变化，已停止跨版本回滚并保留恢复记录。',
+                code='host_identity_changed', details={'components': ['executable']},
+                recovery='保留 switch.json、事务计划及快照；先恢复该事务对应的 Harness 安装版本，再恢复事务。')
         if count < len(operations):
             after, before = self._after(operations[count])
             if after and not before:

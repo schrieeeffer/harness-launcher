@@ -77,13 +77,19 @@ class CurrentLaunchTests(unittest.TestCase):
             self.launch()
         spawn.assert_not_called()
 
-    def test_different_combination_uses_full_transaction(self):
+    def test_different_combination_commits_a_transaction(self):
         self.seal()
-        with patch.object(SwitchPlan, 'verify_current') as verify, patch('launcher.subprocess.Popen'):
+        before = self.manager.tracking.load()['currentCombination']
+        with patch.object(self.manager, 'switch_layers', wraps=self.manager.switch_layers) as switch, \
+                patch('launcher.subprocess.Popen'):
             result = self.manager.apply([], self.manager.state()['revision'], launch=True)
-        verify.assert_not_called()
+        switch.assert_called_once()
         self.assertFalse(result['verifiedCurrent'])
         self.assertEqual(self.manager.state()['enabled'], [])
+        after = self.manager.tracking.load()['currentCombination']
+        self.assertNotEqual(before, after)
+        self.assertEqual(self.manager.tracking.read_object(after)['selection'], [])
+        self.assertFalse((self.manager.tracking.root / 'switch.json').exists())
 
 
 class DormantAdapterLaunchTests(unittest.TestCase):

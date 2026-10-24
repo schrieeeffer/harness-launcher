@@ -33,9 +33,10 @@ from operations import OperationLog, report_progress
 from plugin_tracking import PluginTracking
 from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
+from verification_cache import VerifiedContentCache
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -181,6 +182,7 @@ class Manager:
             raise MenuError('目录迁移尚未完成，请退出后运行 migrate.py --recover。', code='migration_pending')
         self.data.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.verification_cache = VerifiedContentCache(self.data / 'verification-cache.json')
         self.settings_file = self.data / "settings.json"
         self.settings = load_settings(self.settings_file, {
             'home': str(home or os.environ.get('DSH_HOME') or Path.home() / '.dsh'),
@@ -407,7 +409,7 @@ class Manager:
         SwitchPlan(self.tracking).rollback(receipt)
 
     def apply(self, selection, revision, launch=False, native=False, scheme=None):
-        with self.lock:
+        with self.lock, self.verification_cache.session():
             report_progress('check', '检查运行状态与插件选择')
             self.require_stopped()
             try:
@@ -421,6 +423,11 @@ class Manager:
             plugins = self.discover(obj, bundles)
             self.validate_selection(selection, plugins)
             self.require_executable()
+            try:
+                self.tracking.check_host_identity(selection)
+            except PatchError as exc:
+                raise MenuError(str(exc), code=exc.code, details=exc.details,
+                                recovery=exc.recovery, retryable=exc.retryable) from exc
             if scheme is not None:
                 if not isinstance(scheme, str) or scheme not in self.settings['schemes']:
                     raise MenuError('启动方案不存在，请刷新后重试。')
@@ -438,7 +445,7 @@ class Manager:
             controller = self.tracking.core
             has_layer = controller.record.is_file() or any(is_adapter(p['id']) for p in plugins)
             # An already sealed combination can be launched without undoing and
-            # replaying every layer. Still hash live contents on every launch.
+            # replaying every layer. Revalidate live file identities each time.
             try:
                 current_verified = (launch and not changed and
                                     SwitchPlan(self.tracking).verify_current(selection, plugins, raw))
@@ -459,6 +466,9 @@ class Manager:
                 if launch:
                     report_progress('launch', '正在发送 Harness 启动请求')
                     self.require_stopped()
+                    # An updater can finish after the preflight/commit. Do not
+                    # launch a new host with a combination sealed for the old one.
+                    self.tracking.check_host_identity(selection)
                     env = os.environ.copy()
                     env["DSH_HOME"] = str(self.home)
                     subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env,
@@ -670,6 +680,14 @@ class Handler(BaseHTTPRequestHandler):
                                                 details=body['details'], recovery=body['recovery'], retryable=body['retryable'])
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        if getattr(self, 'defer_response', False):
+            # Publish the result only after operation bookkeeping and lock
+            # release. Clients may issue their next mutation immediately.
+            self.pending_response = (code, body, mime)
+            return True
+        return self.send_reply(code, body, mime)
+
+    def send_reply(self, code, body, mime):
         # The application outcome is already determined. A tab closing during
         # response delivery must not relabel a committed mutation as failed or
         # trigger a second HTTP response on a partially written connection.
@@ -783,6 +801,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(415, {"error": "JSON required"})
         if not self.server.mutation_lock.acquire(blocking=False):
             return self.reply(409, {"error": "另一项操作正在进行，请等待完成后重试。"})
+        self.defer_response = True
+        self.pending_response = None
         try:
             if self.server.stopping.is_set():
                 return self.reply(503, {"error": "启动器后台正在退出，请重新打开启动菜单。"})
@@ -795,12 +815,20 @@ class Handler(BaseHTTPRequestHandler):
                 report_progress('check', '等待文件操作完成并检查配置')
                 self.post(body)
         finally:
-            if getattr(self, 'operation_id', None):
-                self.server.operations.finish(self.operation_id, self.operation_error)
-            self.server.mutation_lock.release()
-            if self.server.stopping.is_set():
-                # Stop even if the requesting tab closes before receiving the reply.
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+            try:
+                try:
+                    if getattr(self, 'operation_id', None):
+                        self.server.operations.finish(self.operation_id, self.operation_error)
+                finally:
+                    # Bookkeeping failure must never strand the request lock.
+                    self.server.mutation_lock.release()
+                if self.pending_response is not None:
+                    self.send_reply(*self.pending_response)
+            finally:
+                self.defer_response = False
+                if self.server.stopping.is_set():
+                    # Stop even if the requesting tab closes before receiving the reply.
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def read_request_body(self, size):
         deadline = time.perf_counter() + self.body_timeout
