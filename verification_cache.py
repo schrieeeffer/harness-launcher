@@ -1,7 +1,7 @@
 """Optional NTFS content cache; unsupported or changed files are read in full.
 
 The cache is a performance hint, not a recovery artifact. File identity and NTFS
-ChangeTime supplement size/LastWriteTime, which alone miss restored-mtime edits.
+ChangeTime and per-file USN supplement timestamps, which can collide on fast writes.
 A data-read handle excludes writers/replacement while a hit is checked.
 """
 from contextlib import contextmanager
@@ -81,7 +81,21 @@ class NtfsFingerprint:
         if handle == ctypes.c_void_p(-1).value:
             yield None
             return
+        journal = None
         try:
+            # Query the current journal identity on the same volume for every
+            # fingerprint. A journal reset must not reuse an old file USN key.
+            journal = self.api.CreateFileW(Path(path).anchor, 0, 7, None, 3, 0x02200000, None)
+            if journal == ctypes.c_void_p(-1).value:
+                yield None
+                return
+            from ctypes import wintypes as w
+            def control(target, code, data=None):
+                buffer, length = ctypes.create_string_buffer(4096), w.DWORD()
+                if not self.api.DeviceIoControl(target, code, data, len(data) if data else 0,
+                        buffer, len(buffer), ctypes.byref(length), None):
+                    return None
+                return buffer.raw[:length.value]
             identity = None
             def read():
                 nonlocal identity
@@ -95,9 +109,26 @@ class NtfsFingerprint:
                     # File ID and size cannot change through this handle while
                     # data writers and replacement are excluded by SHARE_READ.
                     identity = (info.volume, info.id_high << 32 | info.id_low, info.size_high << 32 | info.size_low)
+                metadata = control(journal, 0x900f4)
+                record = control(handle, 0x900eb, struct.pack('<HH', 2, 2))
+                if metadata is None or len(metadata) < 56 or record is None or len(record) < 60:
+                    return None
+                journal_id, first, next_usn = struct.unpack_from('<Qqq', metadata)
+                length, major, minor, file_id, parent_id, usn = struct.unpack_from('<IHHQQq', record)
+                if (not journal_id or not 0 <= first <= next_usn or major != 2 or minor != 0
+                        or length != len(record) or length < 60 or file_id != identity[1]
+                        or not 0 < usn < next_usn):
+                    return None
                 values = (identity[0], identity[1], basic.created,
-                          basic.written, basic.changed, identity[2])
+                          basic.written, basic.changed, identity[2], journal_id, usn)
                 return values if all(value > 0 for value in values[1:5]) else None
+            def close_record():
+                data = control(handle, 0x900ef)
+                if data is None or len(data) != 8:
+                    return None
+                usn, = struct.unpack('<q', data)
+                return usn if usn > 0 else None
+            read.close_record = close_record
             if exclusive:
                 # The same handle must read bytes: reopening the pathname is
                 # correctly blocked by our exclusive data-read sharing mode.
@@ -111,16 +142,10 @@ class NtfsFingerprint:
                             return value.hexdigest()
                         value.update(buffer.raw[:length.value])
                 read.hash_content = hash_content
-                def close_record():
-                    from ctypes import wintypes as w
-                    buffer, length = ctypes.create_string_buffer(8), w.DWORD()
-                    if not self.api.DeviceIoControl(handle, 0x900ef, None, 0, buffer, 8, ctypes.byref(length), None) or length.value != 8:
-                        return None
-                    usn, = struct.unpack('<q', buffer.raw)
-                    return usn if usn >= 0 else None
-                read.close_record = close_record
             yield read
         finally:
+            if journal not in (None, ctypes.c_void_p(-1).value):
+                self.api.CloseHandle(journal)
             self.api.CloseHandle(handle)
 
 
@@ -142,12 +167,12 @@ class VerifiedContentCache:
                 return
             envelope = json.loads(path.read_bytes())
             entries = envelope['entries']
-            if (envelope.get('format') != 2 or not isinstance(entries, dict) or len(entries) > self.LIMIT
+            if (envelope.get('format') != 3 or not isinstance(entries, dict) or len(entries) > self.LIMIT
                     or hashlib.sha256(canonical(entries)).hexdigest() != envelope['checksum']):
                 return
             for key, value in entries.items():
                 parts = key.split(':')
-                if (len(parts) != 6 or not all(part.isdecimal() for part in parts)
+                if (len(parts) != 8 or not all(part.isdecimal() for part in parts)
                         or not isinstance(value, str) or len(value) != 64
                         or any(c not in '0123456789abcdef' for c in value)):
                     return
@@ -187,12 +212,26 @@ class VerifiedContentCache:
             with self.lock:
                 known = self.entries.get(key)
             result = known if known is not None else (read_stamp.hash_content() if hasattr(read_stamp, 'hash_content') else reader(path))
-            barrier = read_stamp.close_record() if certify and hasattr(read_stamp, 'close_record') else None
             if read_stamp() != before:
                 raise PatchError('校验期间文件发生变化，请刷新重试：' + str(path))
+            # End any accumulated reason cycle before caching new content.
+            # Otherwise an attribute-only reader can keep a prior write reason
+            # alive and hide a later same-timestamp write behind the same USN.
+            barrier = None
+            if (known is None or certify) and hasattr(read_stamp, 'close_record'):
+                barrier = read_stamp.close_record()
+                after = read_stamp()
+                if after is None or before[:7] != after[:7]:
+                    raise PatchError('校验期间文件发生变化，请刷新重试：' + str(path))
+                if barrier is None:
+                    return result  # Full read is usable, but cannot seed a hit.
+                if after[7] != barrier:
+                    raise PatchError('校验期间文件变更日志发生变化，请刷新重试：' + str(path))
+                before = after
+                key = ':'.join(map(str, before))
             if certify and barrier is not None:
                 certify(before, barrier)
-            if known is None:
+            if known is None or barrier is not None:
                 with self.lock:
                     identity = ':'.join(map(str, before[:3]))
                     previous = self.identities.get(identity)
@@ -211,7 +250,7 @@ class VerifiedContentCache:
                 self.entries = dict(list(self.entries.items())[-self.LIMIT:])
                 self.identities = {':'.join(key.split(':')[:3]): key for key in self.entries}
             try:
-                payload = {'format': 2, 'entries': self.entries,
+                payload = {'format': 3, 'entries': self.entries,
                            'checksum': hashlib.sha256(canonical(self.entries)).hexdigest()}
                 atomic_write(self.safe_path(), canonical(payload))
                 self.dirty = False

@@ -37,7 +37,7 @@ class TreeCheckpoints:
                 return
             envelope = json.loads(path.read_bytes())
             trees = envelope['trees']
-            if (envelope.get('format') != 2 or not isinstance(trees, dict)
+            if (envelope.get('format') != 3 or not isinstance(trees, dict)
                     or len(trees) > self.MAX_TREES
                     or hashlib.sha256(canonical(trees)).hexdigest() != envelope['checksum']):
                 return
@@ -65,7 +65,7 @@ class TreeCheckpoints:
                     if type(entry.get('proof_usn')) is not int or entry['proof_usn'] < 0:
                         return
                     if entry['type'] == 'file' and (not self.numbers(entry.get('stamp'), 3)
-                            or not self.numbers(entry.get('ntfsIdentity'), 6)
+                            or not self.numbers(entry.get('ntfsIdentity'), 8)
                             or entry['ntfsIdentity'][0] != identity[0]
                             or entry['ntfsIdentity'][1] != entry['file_id']):
                         return
@@ -196,7 +196,7 @@ class TreeCheckpoints:
             return
         try:
             trees = {key: {k: v for k, v in tree.items() if k != 'ids'} for key, tree in self.trees.items()}
-            envelope = {'format': 2, 'trees': trees, 'checksum': hashlib.sha256(canonical(trees)).hexdigest()}
+            envelope = {'format': 3, 'trees': trees, 'checksum': hashlib.sha256(canonical(trees)).hexdigest()}
             atomic_write(self.safe_path(), canonical(envelope))
             self.dirty = False
         except (OSError, ValueError, PatchError):

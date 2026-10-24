@@ -24,7 +24,7 @@ class VerificationCacheTests(unittest.TestCase):
 
     @contextmanager
     def fixed(self, path):
-        yield lambda: (1, 2, 3, 4, 5, 3)
+        yield lambda: (1, 2, 3, 4, 5, 3, 6, 7)
 
     def test_unchanged_fingerprint_reuses_hash_across_cache_reload(self):
         reader = Mock(wraps=hash_file)
@@ -52,17 +52,17 @@ class VerificationCacheTests(unittest.TestCase):
         expected = cache.hash(self.file, hash_file)
         cache.flush()
         saved = json.loads(self.cache_path.read_bytes())
-        saved['entries']['1:2:3:4:5:3'] = '0' * 64
+        saved['entries']['1:2:3:4:5:3:6:7'] = '0' * 64
         self.cache_path.write_text(json.dumps(saved))
         reader = Mock(wraps=hash_file)
         self.assertEqual(VerifiedContentCache(self.cache_path, self.fixed).hash(self.file, reader), expected)
         reader.assert_called_once()
 
     def test_changed_or_unavailable_second_stamp_aborts_without_caching(self):
-        for last in (None, (1, 2, 3, 4, 6, 3)):
+        for last in (None, (1, 2, 3, 4, 6, 3, 7, 8)):
             @contextmanager
             def changing(path):
-                yield Mock(side_effect=[(1, 2, 3, 4, 5, 3), last])
+                yield Mock(side_effect=[(1, 2, 3, 4, 5, 3, 7, 8), last])
             cache = VerifiedContentCache(self.cache_path, changing)
             with self.assertRaises(PatchError):
                 cache.hash(self.file, hash_file)
@@ -122,11 +122,69 @@ class VerificationCacheTests(unittest.TestCase):
         cache.hash(self.file, hash_file)
         cache.flush()
         envelope = json.loads(self.cache_path.read_bytes())
-        envelope['format'] = 1
-        self.cache_path.write_text(json.dumps(envelope))
-        reader = Mock(wraps=hash_file)
-        VerifiedContentCache(self.cache_path, self.fixed).hash(self.file, reader)
-        reader.assert_called_once()
+        for legacy in (1, 2):
+            envelope['format'] = legacy
+            self.cache_path.write_text(json.dumps(envelope))
+            reader = Mock(wraps=hash_file)
+            VerifiedContentCache(self.cache_path, self.fixed).hash(self.file, reader)
+            reader.assert_called_once()
+
+    def test_same_timestamp_writes_with_lingering_attribute_handle_use_usn(self):
+        self.require_ntfs()
+        class FrozenTimes(NtfsFingerprint):
+            first = None
+            @contextmanager
+            def __call__(self, path, **kwargs):
+                with super().__call__(path, **kwargs) as original:
+                    if original is None:
+                        yield None
+                        return
+                    def read():
+                        stamp = original()
+                        if stamp is None:
+                            return None
+                        if self.first is None:
+                            self.first = stamp[2:5]
+                        # Deterministically reproduce a coarse filesystem clock
+                        # while retaining real file identity, size and USNs.
+                        return stamp[:2] + self.first + stamp[5:]
+                    read.close_record = original.close_record
+                    yield read
+        fp = FrozenTimes()
+        cache = VerifiedContentCache(self.cache_path, fp)
+        from ntfs_journal import NtfsJournal
+        with NtfsJournal(fp).handle(self.file, 0x80):
+            for value in (b'one', b'two', b'tri', b'for'):
+                self.file.write_bytes(value)
+                self.assertEqual(cache.hash(self.file, hash_file), hash_file(self.file))
+                cache.flush()
+                cache = VerifiedContentCache(self.cache_path, fp)
+        self.assertEqual(len(cache.entries), 1)
+
+    def test_journal_identity_change_invalidates_same_file_usn(self):
+        journal_id = 6
+        @contextmanager
+        def stamp(path):
+            yield lambda: (1, 2, 3, 4, 5, 3, journal_id, 7)
+        cache = VerifiedContentCache(self.cache_path, stamp)
+        before = cache.hash(self.file, hash_file)
+        self.file.write_bytes(b'new')
+        journal_id += 1
+        self.assertNotEqual(cache.hash(self.file, hash_file), before)
+        self.assertEqual(len(cache.entries), 1)
+
+    def test_missing_close_barrier_never_seeds_content_cache(self):
+        @contextmanager
+        def stamp(path):
+            def read():
+                return (1, 2, 3, 4, 5, 3, 6, 7)
+            read.close_record = lambda: None
+            yield read
+        cache = VerifiedContentCache(self.cache_path, stamp)
+        before = cache.hash(self.file, hash_file)
+        self.file.write_bytes(b'new')
+        self.assertNotEqual(cache.hash(self.file, hash_file), before)
+        self.assertFalse(cache.entries)
 
     def test_repeated_edits_keep_only_current_fingerprint_per_identity(self):
         self.require_ntfs()
@@ -142,7 +200,7 @@ class VerificationCacheTests(unittest.TestCase):
         cache = VerifiedContentCache(self.cache_path, self.fixed)
         cache.LIMIT = 2
         for index in range(5):
-            cache.entries[f'1:{index}:3:4:5:3'] = '0' * 64
+            cache.entries[f'1:{index}:3:4:5:3:6:7'] = '0' * 64
         cache.dirty = True
         cache.flush()
         self.assertEqual(len(cache.entries), 2)

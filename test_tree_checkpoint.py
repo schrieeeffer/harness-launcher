@@ -221,9 +221,10 @@ class TreeCheckpointTests(unittest.TestCase):
         self.seal()
         self.checkpoints.flush()
         envelope = json.loads(self.checkpoints.path.read_bytes())
-        envelope['format'] = 1
-        self.checkpoints.path.write_bytes(canonical(envelope))
-        self.assertFalse(VerifiedContentCache(self.cache_path).tree_checkpoints.trees)
+        for legacy in (1, 2):
+            envelope['format'] = legacy
+            self.checkpoints.path.write_bytes(canonical(envelope))
+            self.assertFalse(VerifiedContentCache(self.cache_path).tree_checkpoints.trees)
 
     def test_gap_falls_back_then_can_build_new_checkpoint(self):
         expected = self.seal()

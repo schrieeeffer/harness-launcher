@@ -4,6 +4,8 @@
 
 ### Plugin-switch verification performance
 
+- Fix a rapid-write timestamp collision exposed by Windows CI: include per-file USN and fresh journal identity in content-cache keys, and establish a CLOSE barrier before caching a new hash. Reject legacy file/tree formats 1 and 2. Add deterministic same-timestamp/lingering-handle, journal-reset and unavailable-barrier regressions.
+
 - Check recorded executable/archive identities before backups and large directory scans. Report `host_identity_changed` for possible updates or manual replacements; identical-content replacement and legitimate recorded generic ASAR patches remain accepted by this early filter. Refuse cross-version transaction rollback and retain recovery artifacts. Automatic patch migration across Harness releases is not implemented.
 - Add disposable directory checkpoints guarded by continuous unprivileged NTFS USN records and stable root identities. Reuse an unchanged verified tree across purge directory moves; journal gaps, unsupported records and internal edits fall back to complete verification.
 - Establish checkpoints with exclusive data reads and explicit per-entry USN CLOSE barriers, including protection against attribute-only handles retaining a coalesced change cycle. Reject experimental tree-cache format 1; retain immutable baselines, delta objects and transaction rollback separately.
@@ -13,9 +15,9 @@
 - Avoid traversing inactive adapter trees when ordinary plugins change and the built-in adapter remains native. Validate immutable adapter metadata and active native files, and verify the complete parked tree again before enabling the adapter.
 - Reuse a sealed native baseline only after freshly computed active contents, host and archive identities match. Avoid redundant ASAR member parsing and unused baseline-copy reads; all blobs actually needed for replay or rollback are still verified.
 - Add configuration-only transactions for recorded plugins with empty file deltas; validate the current sealed contents before changing only the bundle list.
-- Hash independent files with up to 32 workers. On local NTFS, reuse verified contents only when volume/file identity, creation time, write time, ChangeTime and size match. Unsupported metadata falls back to full reads; corrupt optional caches are discarded. Commit checks and serialized writes/rollback remain in place.
+- Hash independent files with up to 32 workers. On local NTFS, reuse verified contents only when volume/file identity, creation time, write time, ChangeTime, size, current journal identity and per-file USN match. Unsupported metadata falls back to full reads; corrupt optional caches are discarded. Commit checks and serialized writes/rollback remain in place.
 - Keep one cached version per file identity and cap the optional cache at 100,000 entries. Repeated edits discard obsolete fingerprints without deleting application files or recovery objects. Directory-tree fingerprints are reused only within unchanged planning overlays.
-- Require data-read access, not attribute-only access, to exclude writers during NTFS cache validation; reject legacy cache format 1 and rebuild format 2. Verify existing-writer fallback and same-size/restored-mtime edits in isolated tests.
+- Require data-read access, not attribute-only access, to exclude writers during NTFS cache validation; reject legacy cache formats 1 and 2 and rebuild format 3. Verify existing-writer fallback and same-size/restored-mtime edits in isolated tests.
 - Reindex only moved subtrees in the planning overlay, preserving unrelated directory indexes and empty directories.
 - Publish 31 isolated-data feature screenshots, embedded Markdown, architecture and verification diagrams, host-update guidance and measured startup data; see `docs/validation-0.3.2.md`. Actual private Harness conversation screenshots are excluded.
 - Count every file in the current verification scope, show separate labels for planning and commit checks, and report move validation separately. A completed live-file count no longer masks a long unreported parked-tree scan.

@@ -23,14 +23,14 @@ Progress counts include metadata checks. Cache hits still count as verified file
 - Reuse matching sealed baseline/archive information; verify every recovery blob actually used.
 - Use up to 32 read workers and reuse unchanged directory fingerprints within planning overlays.
 - Reindex only the moved subtree in a planning overlay rather than rebuilding every unrelated directory index.
-- On local NTFS, reuse verified hashes only after checking volume/file identity, creation time, LastWriteTime, ChangeTime and size. Data-read handles with read-only sharing exclude writers/replacement during checks. Unsupported metadata, changed files and damaged caches require full reads.
+- On local NTFS, reuse verified hashes only after checking volume/file identity, creation time, LastWriteTime, ChangeTime, size, current journal identity and per-file USN. Data-read handles with read-only sharing exclude writers/replacement during checks. Unsupported metadata, changed files and damaged caches require full reads.
 - Replace obsolete fingerprints for the same file identity and cap the optional cache at 100,000 entries. Application files and recovery objects are retained.
 - Reuse verified directory checkpoints only after fresh root-identity and continuous NTFS USN checks. Whole-directory renames can reuse contents; internal edits, journal gaps or unavailable interfaces require full verification.
 - Establish checkpoints with exclusive data reads and USN CLOSE barriers, including protection against attribute-only handles retaining a coalesced change cycle. Bound path/index projections to two locations and isolate planning overlays from real checkpoints.
 - Build the final inventory from the independently verified output snapshot. Finish operation bookkeeping and release the request lock before network delivery, so slow clients do not block subsequent mutations.
 - Reject changed host identities before backups and large tree scans, then recheck before process creation. An obsolete patch attempt does not create new backup history merely to discover a host update. See [updates and conflicts](host-updates.md).
 
-Cache format 2 uses `GENERIC_READ`; attribute-only access does not exclude data writers. Legacy format 1 is discarded and rebuilt once. An existing writer, an unavailable handle or unsupported identity information cannot establish a cache hit. Directory checkpoints also use format 2 and reject the earlier experimental format. See the [checkpoint design](checkpoint-design.md) for the journal and fallback boundaries.
+Cache format 3 uses `GENERIC_READ`; attribute-only access does not exclude data writers. Legacy formats 1 and 2 are discarded and rebuilt once. An existing writer, an unavailable handle or unsupported identity information cannot establish a cache hit. Directory checkpoints also use format 3 and reject formats 1 and 2. See the [checkpoint design](checkpoint-design.md) for the journal and fallback boundaries.
 
 See Microsoft's [FILE_BASIC_INFO documentation](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_basic_info) for ChangeTime. This optimization detects normal filesystem changes; it is not a guarantee against manipulated system metadata or offline disk corruption.
 
