@@ -490,6 +490,7 @@ class SwitchPlan:
                 actual = self.tracker.versions.content_state(verified_snapshot)
             if actual != plan['target']:
                 raise PatchError('切换后的文件未通过整套组合校验。')
+            self.verify_recovery_host(plan, len(plan['operations']))
             if plan['newCore']:
                 self.core.save(plan['newCore'])
             if plan['new']['records'] and not configuration_only:
@@ -507,7 +508,11 @@ class SwitchPlan:
             try:
                 self.recover(notify=False)
             except Exception as rollback_error:
-                raise PatchError('组合切换和回滚未完成，请保留快照与 switch.json：' + str(rollback_error)) from error
+                details = ({'code': rollback_error.code, 'details': rollback_error.details,
+                            'recovery': rollback_error.recovery, 'retryable': rollback_error.retryable}
+                           if isinstance(rollback_error, PatchError) else {})
+                raise PatchError('组合切换和回滚未完成，请保留快照与 switch.json：' + str(rollback_error),
+                                 **details) from error
             raise PatchError('组合切换失败，已恢复切换前状态：' + str(error)) from error
         # Once the commit marker is durable, cleanup cannot turn this into a
         # failed switch: recovery deliberately preserves committed file state.
@@ -528,6 +533,59 @@ class SwitchPlan:
                    'plan': self.tracker.versions.object('transactions', plan)}
         put(self.journal, json.dumps(journal, ensure_ascii=False).encode())
         self.recover(notify=False)
+
+    def verify_recovery_host(self, plan, count):
+        """Check all archive locations at the journal cursor before any undo.
+
+        The executable can stay identical in an ASAR-only update. Account for
+        this transaction's legitimate archive edits/moves in memory, including
+        the mutation-before-cursor-persistence crash boundary. Never accept a
+        new active ASAR just because an old parked archive is still present.
+        """
+        def reject(component):
+            raise PatchError('Harness 宿主文件在事务期间发生变化，已停止跨版本回滚并保留恢复记录。',
+                code='host_identity_changed', details={'components': [component]},
+                recovery='保留 switch.json、事务计划及快照；先恢复该事务对应的 Harness 安装版本，再恢复事务。')
+        if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != plan['host']:
+            reject('executable')
+        paths = {self.core.archive: 'archive|.',
+                 self.core.resources / 'app.asar.bak': 'archive_backup|.',
+                 self.core.stash / 'official.asar': None}
+        if plan.get('configurationOnly'):
+            state = self.tracker.read_object(plan['previous']['currentCombination'])['state']
+            entries = {path: state.get(key) for path, key in paths.items()}
+            core = plan['inputCore']
+            if core and core['mode'] == 'plugin':
+                entries[self.core.stash / 'official.asar'] = {'type': 'file', 'hash': core['archiveHash']}
+        else:
+            entries = {path: plan['expected'].get(str(path)) for path in paths}
+        expected = {}
+        for path, entry in entries.items():
+            if entry and entry['type'] != 'file':
+                reject('officialArchive')
+            expected[path] = entry['hash'] if entry else None
+        for op in plan['operations'][:count]:
+            if op['engine'] == 'tracking':
+                path = self.tracker.target(op['key'])
+                if path in expected:
+                    entry = op['after']
+                    if entry and entry['type'] != 'file':
+                        reject('officialArchive')
+                    expected[path] = entry['hash'] if entry else None
+            elif op['kind'] == 'file':
+                path = Path(op['path'])
+                if path in expected:
+                    expected[path] = op['after']
+            else:
+                source, dest = Path(op['source']), Path(op['dest'])
+                if source in expected or dest in expected:
+                    if source not in expected or dest not in expected or op['directory']:
+                        reject('officialArchive')
+                    expected[dest], expected[source] = expected[source], None
+        for path, digest in expected.items():
+            if (path.is_symlink() or path.is_junction() or (path.exists() and not path.is_file())
+                    or self.tracker.versions.hash(path) != digest):
+                reject('officialArchive')
 
     def recover(self, notify=True):
         if not self.journal.exists():
@@ -551,10 +609,6 @@ class SwitchPlan:
         if journal.get('committed'):
             self.journal.unlink()
             return
-        if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != plan['host']:
-            raise PatchError('Harness 宿主文件在事务期间发生变化，已停止跨版本回滚并保留恢复记录。',
-                code='host_identity_changed', details={'components': ['executable']},
-                recovery='保留 switch.json、事务计划及快照；先恢复该事务对应的 Harness 安装版本，再恢复事务。')
         if count < len(operations):
             after, before = self._after(operations[count])
             if after and not before:
@@ -564,6 +618,7 @@ class SwitchPlan:
         # Save a decreasing cursor before each undo. A crash after undo is
         # recognized as a not-applied candidate on the next recovery attempt.
         while count:
+            self.verify_recovery_host(plan, count)
             op = operations[count - 1]
             after, before = self._after(op)
             if not after and not before:
@@ -573,6 +628,7 @@ class SwitchPlan:
             if after and not before:
                 self.replay(op, undo=True)
             count -= 1
+        self.verify_recovery_host(plan, 0)
         self.restore_states(plan)
         self.journal.unlink()
         if notify:

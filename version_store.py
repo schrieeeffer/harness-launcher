@@ -201,7 +201,9 @@ class VersionStore:
         expected = self.store.read_object(reference)
         actual = self.capture(name, expected.get('source', ''), store=False, metadata=False)
         if actual != {k: v for k, v in expected.items() if k != 'installMetadata'}:
-            raise PatchError('插件或依赖内容与版本记录不同，请通过启动器重新记录升级：' + name)
+            raise PatchError('插件或依赖内容与版本记录不同，旧补丁不能用于更新后的插件：' + name,
+                code='plugin_identity_changed', details={'plugin': name},
+                recovery='保留记录；先恢复记录对应的插件包及依赖，再从“升级 / 重新记录”开始。仅修改版本号或清空缓存不能恢复旧基线。')
         for package in expected['packages'].values():
             for entry in package['files'].values():
                 if entry['type'] == 'file':

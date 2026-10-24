@@ -452,7 +452,7 @@ class PatchModes:
         # generic switch. Its immutable metadata remains checked; enabling it
         # still verifies the complete package and both live/parked trees.
         self._versions().verify_adapter(state, self.adapter.plugin, installed=not preserve_native)
-        if purge and purge['version'] != state['pluginVersion']:
+        if not preserve_native and purge and purge['version'] != state['pluginVersion']:
             raise PatchError('dsh-purge 已升级，旧补丁快照已停用。需在新版本上重新建立快照。')
         official = self.verify_files(state, view, preserve_native=preserve_native)
         if preserve_native:

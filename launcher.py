@@ -468,6 +468,7 @@ class Manager:
                     self.require_stopped()
                     # An updater can finish after the preflight/commit. Do not
                     # launch a new host with a combination sealed for the old one.
+                    self.tracking.check_launch_packages(selection, payload)
                     self.tracking.check_host_identity(selection)
                     env = os.environ.copy()
                     env["DSH_HOME"] = str(self.home)
@@ -481,7 +482,10 @@ class Manager:
                     try:
                         self.rollback_layers(receipt)
                     except Exception as rollback_error:
-                        raise MenuError('启动失败且补丁回滚未完成：' + str(rollback_error)) from exc
+                        details = ({'code': rollback_error.code, 'details': rollback_error.details,
+                                    'recovery': rollback_error.recovery, 'retryable': rollback_error.retryable}
+                                   if isinstance(rollback_error, PatchError) else {})
+                        raise MenuError('启动失败且补丁回滚未完成：' + str(rollback_error), **details) from exc
                 raise MenuError(("启动失败，已恢复切换前配置：" if receipt else "无法完成切换，已停止操作：") + str(exc)) from exc
             result = {"message": ("启动请求已发送" if launch else "插件配置已保存") +
                       (f" · 已选择 {len(selection)} 个额外插件" if selection else " · 不加载额外插件"),

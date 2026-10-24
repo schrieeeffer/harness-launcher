@@ -83,6 +83,8 @@ Harness Launcher addresses this with a local web interface. You pick plugins bef
 
 ## Getting started
 
+Before updating, read the [host and plugin update guide (Chinese)](docs/host-updates.md): restore native mode before a Harness update, use “升级 / 重新记录” for ordinary plugins, and use dedicated adaptation for purge. The launcher cannot intercept Harness's updater or its automatic restart; it checks host, plugin and dependency changes at subsequent operation boundaries and retains recovery records. New installation sessions require an update-guard-aware launcher. Complete or recover older unfinished sessions in their original launcher version first.
+
 ### Upgrading to 0.3.0
 
 0.3.0 uses format 3 for settings, the plugin registry, adapter state, switch journals and configuration backups. The runtime accepts only this format. To upgrade a complete v2 store, finish pending installations and recovery in the previous version, fully quit Harness and the launcher service, then run in the project folder:

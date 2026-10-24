@@ -113,6 +113,8 @@ When several plugins change the same file, the launcher checks the baseline hash
 
 ### Upgrading and re-recording
 
+Keep host and plugin updates separate. Before installation, new sessions pin official archive contents and all other installed plugins and their dependencies. Same-version replacements, shared-dependency changes and ASAR-only host updates are checked. Plugins that directly replace the official ASAR cannot use this generic recording path. Complete or recover older unfinished sessions in their original launcher version; current files cannot reconstruct missing pre-update evidence. See the [update guide (Chinese)](host-updates.md) for scenarios and recovery boundaries.
+
 To upgrade a recorded plugin, click **Upgrade / re-record** in **Patch records** and choose the new source (for example an npm version), or keep "install it yourself" and upgrade inside Harness.
 
 - Verify and retain the currently installed package and dependencies before undoing its old layer and taking a new file baseline.

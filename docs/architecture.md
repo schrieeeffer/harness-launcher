@@ -16,10 +16,12 @@ flowchart TB
     API --> HOST["宿主内容边界检查\n程序 / 活动归档变化时提前拒绝"]
     HOST --> SP["SwitchPlan\n验证当前组合 / 规划并执行切换"]
     API --> PT["PluginTracking\n安装前后记录与版本约束"]
+    PT --> PIN["安装会话：固定官方归档与其他插件依赖\n混合更新暂停；会话声明更新保护能力"]
     PT --> VS["VersionStore\n插件依赖、版本、组合与原生基线"]
     SP --> FV["FileView\n只读文件视图、并发校验、组合预演"]
     SP --> PM["PatchModes + Adapter\n限定目标路径的文件写入与目录移动"]
     SP --> J["switch.json\n持久事务游标、提交标记、故障恢复"]
+    J --> REC["撤销前核对程序和归档位置\n按游标推演合法移动，未知更新保留日志"]
     FV --> VC["VerifiedContentCache\n可丢弃的本机 NTFS 哈希缓存"]
     VS --> VC
     FV --> TC["TreeCheckpoints\n按目录身份保存已验证索引"]
@@ -33,7 +35,8 @@ flowchart TB
     API --> RESPONSE["结束操作记录 → 释放请求锁 → 发送响应\n慢客户端不阻塞后续请求；异常仍释放锁"]
     RESPONSE --> UI
     SP --> OK["校验与提交成功"]
-    OK --> RUN["发送 Harness 启动请求"]
+    OK --> LAST["启动前再核对配置、插件依赖与宿主"]
+    LAST --> RUN["发送 Harness 启动请求"]
     RUN --> WIN["Harness 自身加载插件及窗口\n窗口可用须另行实测"]
 ```
 
@@ -61,7 +64,9 @@ flowchart TD
     C --> I["完成验证并确认运行条件"]
     H --> I
     I --> L{"是否启动？"}
-    L -->|是| M["发送启动请求，等待应用自行加载"]
+    L -->|是| RECHECK{"配置、插件依赖及宿主仍匹配？"}
+    RECHECK -->|否| HOLD["保留已验证组合与记录\n不执行未知新版插件"]
+    RECHECK -->|是| M["发送启动请求，等待应用自行加载"]
     L -->|否| N["仅保存配置"]
     F -. "每次独立复核" .-> T{"目录检查点与连续 USN 日志有效？"}
     T -->|内容无变更，目录身份相同| FAST["复用目录索引、指纹及内容哈希\n整目录重命名可复用"]
@@ -79,12 +84,15 @@ flowchart TD
 
 </details>
 
-The diagrams describe implemented paths, including the checkpoint optimization under acceptance testing. See [checkpoint design](checkpoint-design.md). They are not a 30-second guarantee. A full
-adapter switch still has independent input, move and output checks. The current
-purge measurements exceed the acceptance limit.
+The diagrams describe implemented paths. See [checkpoint design](checkpoint-design.md)
+and [update boundaries](host-updates.md). Full adapter switches retain independent
+input, move and output checks. Published window samples met the approximate local
+target, not a guaranteed 30-second bound; later update-guard changes require their
+own regression validation.
 
-图示包含正在验收的检查点优化，详见[设计说明](checkpoint-design.md)，不表示已达到 30 秒。内置补丁切换仍保留输入、移动前及输出校验，
-本机 purge 测量仍超过验收上限。
+图示描述已实现路径，详见[检查点设计](checkpoint-design.md)和[更新边界](host-updates.md)。
+内置补丁切换保留输入、移动前及输出校验。已发表窗口样本符合本机约 30 秒目标，不是严格上限；
+后续更新保护改动需要单独回归验证。
 
 ## Boundaries / 模块边界
 

@@ -21,7 +21,8 @@ from urllib.parse import urlparse
 from adapters import is_adapter
 from domain import (ContentIdentity, DomainError, ManagedPath, PLUGIN_NAME,
                     SnapshotEntry, validate_snapshot, validate_changes)
-from recording_state import RecordingEvent, RecordingPhase, RecordingSession, RunState, validate_registry
+from recording_state import (RecordingEvent, RecordingPhase, RecordingSession, RunState,
+                             UPDATE_GUARDS, validate_registry)
 from patch_modes import PatchError, PatchModes, file_hash, put, sha
 from runtime_context import RuntimeContext
 from storage import ContentStore, write_json
@@ -360,7 +361,9 @@ class PluginTracking:
             if record['enabled'] or plugin in selection:
                 self.versions.verify_record(plugin, record)
             if (record['enabled'] or plugin in selection) and available.get(plugin) != record['version']:
-                raise TrackingError('插件版本已变化，需在更新前重新记录：' + plugin)
+                raise TrackingError('插件版本已变化，旧补丁不能用于更新后的插件：' + plugin,
+                    code='plugin_identity_changed', details={'plugin': plugin},
+                    recovery='保留现有记录。若已在记录窗口外更新，请先恢复记录对应的插件及依赖，再从“升级 / 重新记录”开始；不能对更新后的文件补记旧基线。')
             if (record['enabled'] or plugin in selection) and record.get('package'):
                 self.versions.verify_package(plugin, record['package'])
         host_hash = None
@@ -370,6 +373,48 @@ class PluginTracking:
                     host_hash = self.versions.hash(Path(self.manager.settings['executable']))
                 if host_hash != record['hostHash']:
                     raise TrackingError('Harness 程序已更新，不能使用旧版本的文件记录：' + name)
+
+    def check_launch_packages(self, selection, manifest):
+        """Recheck executable plugin code after file switching, just before spawn."""
+        raw, obj, bundles = self.manager.manifest()
+        if raw != manifest:
+            raise TrackingError('启动前加载组合发生变化，未打开 Harness。', code='revision_conflict', retryable=True)
+        plugins = self.manager.discover(obj, bundles)
+        self.check_versions(plugins, selection)
+        if self.core.adapter.plugin in selection:
+            state = self.core.load()
+            if state is None:
+                raise TrackingError('启动前缺少内置插件的版本记录。')
+            self.versions.verify_adapter(state, self.core.adapter.plugin)
+        if self.manager.manifest_path.read_bytes() != manifest:
+            raise TrackingError('启动前加载配置再次发生变化，未打开 Harness。', code='revision_conflict', retryable=True)
+
+    def check_session_host(self, session):
+        """An install recording must never absorb an official host replacement.
+
+        ASARs are host anchors during recording. Plugins may change extracted
+        app files, but replacing the official archive requires a new host base.
+        Derive the expectation from existing immutable snapshots, not live bytes.
+        """
+        if self.versions.hash(Path(self.manager.settings['executable'])) != session['hostHash']:
+            raise TrackingError('Harness 程序已更新，已保留原始快照并停止安装记录。',
+                code='host_identity_changed', details={'components': ['executable']})
+        if session.get('hostArchives') is None:
+            raise TrackingError('旧安装会话缺少更新边界记录，不能自动采纳当前文件。请保留会话，在建立它的启动器版本中完成或恢复安装后再升级。')
+        if self.session_archives() != session['hostArchives']:
+            raise TrackingError('安装记录期间 Harness 官方归档发生变化，不能把宿主更新保存为插件补丁。',
+                code='host_identity_changed', details={'components': ['officialArchive']},
+                recovery='保留安装会话和快照；先恢复本次记录对应的 Harness 版本。官方更新和插件更新必须分开进行。')
+
+    def session_archives(self):
+        paths = {'archive': self.core.archive, 'archive_backup': self.core.resources / 'app.asar.bak',
+                 'parked_archive': self.core.stash / 'official.asar'}
+        result = {}
+        for name, path in paths.items():
+            if path.is_symlink() or path.is_junction() or (path.exists() and not path.is_file()):
+                raise TrackingError('宿主归档位置含链接或目录，无法建立更新边界记录。')
+            result[name] = self.versions.hash(path)
+        return result
 
     def summary(self):
         value = self.load()
@@ -440,8 +485,10 @@ class PluginTracking:
             unknown = [p['id'] for p in existing if p['id'] not in value['records'] and not is_adapter(p['id'])]
             if unknown:
                 raise TrackingError('已存在没有安装前记录的插件，不能把未知改动当作原始文件：' + '、'.join(unknown))
+            self.check_versions(existing, [p['id'] for p in existing if p['enabled']])
+            if core_state and self.core.adapter.plugin in bundles:
+                self.versions.verify_adapter(core_state, self.core.adapter.plugin)
             if name in value['records']:
-                self.check_versions(existing, [p['id'] for p in existing if p['enabled']])
                 # Remove the old layer before taking an upgrade baseline.
                 self.manager.apply([x for x in bundles if x not in ('@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', name)], sha(raw))
                 value = self.load()
@@ -455,7 +502,18 @@ class PluginTracking:
                 base_selection=tuple(p for p in bundles if p not in ('@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app')),
                 versions={p['id']: p['version'] for p in plugins},
                 base_versions={p: value['records'][p]['revision'] for p in value['order'] if p in bundles and p != name},
+                host_archives=self.session_archives(),
+                package_pins={p['id']: self.versions.package_snapshot(p['id']) for p in plugins if p['id'] != name},
                 initial_inventory=self.object('snapshots', self.metadata())).validate().to_dict()
+            # Package capture can take time. Do not pin an updater's result as
+            # the old host, or publish a session against a changed manifest.
+            self.manager.require_stopped()
+            self.check_host_identity(value=value)
+            self.check_session_host(value['session'])
+            if self.manager.manifest_path.read_bytes() != raw:
+                raise TrackingError('准备安装期间加载配置发生变化，尚未开始安装，请刷新后重试。',
+                    code='revision_conflict', retryable=True)
+            value['requiredFeatures'] = [UPDATE_GUARDS]
             self._owned_session = value['session']['id']
             self._quiet = None
             value['completed'] = None
@@ -468,6 +526,8 @@ class PluginTracking:
         self.manager.require_stopped()
         value = self.load()
         session = value['session']
+        self.check_session_host(session)
+        self._verify_base_packages(session)
         if not session.get('baseline'):
             if self.metadata() != self.read_object(session['initialInventory']):
                 raise TrackingError('备份完成前文件已经改变，不能把现状当作原始文件。请恢复原状后重试。')
@@ -483,6 +543,7 @@ class PluginTracking:
                              manifest_before=self.versions.object('baselines',
                                  {'manifest': manifest.decode('utf-8-sig'), 'bom': manifest.startswith(b'\xef\xbb\xbf')}))
             self.save(value)
+        self.check_session_host(session)
         if session['source'] and not session.get('installed'):
             self._transition(session, RecordingEvent.INSTALL)
             self.save(value)
@@ -521,8 +582,7 @@ class PluginTracking:
             session = value.get('session')
             if not session or session['phase'] != 'recording' or not session.get('baseline'):
                 raise TrackingError('原始文件尚未备份，不能打开安装环境。')
-            if session.get('hostHash') != file_hash(Path(self.manager.settings['executable'])):
-                raise TrackingError('Harness 程序已更新，已保留原始快照并停止安装。')
+            self.check_session_host(session)
             raw, obj, bundles = self.manager.manifest()
             name = session['plugin']
             plugins = self.manager.discover(obj, bundles)
@@ -654,15 +714,16 @@ class PluginTracking:
             raise TrackingError('其他插件的加载组合发生变化，请恢复安装前的组合后重试。')
         if name not in bundles:
             raise TrackingError('本次插件未启用，无法确认首次运行已被记录。请启用它后继续自动记录。')
-        if file_hash(Path(self.manager.settings['executable'])) != session.get('hostHash'):
-            raise TrackingError('Harness 程序已更新，不能把跨版本的文件差异保存为插件补丁。')
+        self.check_session_host(session)
         self._verify_base_packages(session)
         return versions
 
     def _verify_base_packages(self, session):
-        for other, record in self.load()['records'].items():
-            if other != session['plugin'] and record.get('package') and other in session['baseSelection']:
-                self.versions.verify_package(other, record['package'])
+        pins = session.get('packagePins')
+        if pins is None:
+            raise TrackingError('旧安装会话缺少其他插件的更新前记录，已停止自动保存并保留恢复材料。')
+        for name, reference in pins.items():
+            self.versions.verify_package(name, reference)
 
     def finish(self):
         with self.manager.lock:
@@ -758,6 +819,7 @@ class PluginTracking:
             # The new recording sits on top of every layer that stayed enabled.
             value['order'] = [p for p in value['order'] if p != name] + [name]
             value['session'] = None
+            value['requiredFeatures'] = [feature for feature in value.get('requiredFeatures', []) if feature != UPDATE_GUARDS]
             value['inventory'] = self.object('snapshots', inventory)
             value['completed'] = {'plugin': name, 'count': len(changes), 'at': time.time()}
             value['currentCombination'] = None  # Next switch verifies and seals this new revision.
@@ -773,6 +835,8 @@ class PluginTracking:
             session = value.get('session')
             if not session:
                 raise TrackingError('没有进行中的安装。')
+            self.check_session_host(session)
+            self._verify_base_packages(session)
             raw, obj, bundles = self.manager.manifest()
             versions = {p['id']: p['version'] for p in self.manager.discover(obj, bundles)}
             if versions != session['versions']:
@@ -806,5 +870,6 @@ class PluginTracking:
                 # revision was disabled before taking the upgrade baseline.
                 put(self.manager.manifest_path, restore_manifest)
             value['session'] = None
+            value['requiredFeatures'] = [feature for feature in value.get('requiredFeatures', []) if feature != UPDATE_GUARDS]
             self.save(value)
             return {'message': '已取消尚未发生文件改动的安装。'}

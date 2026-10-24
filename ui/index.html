@@ -231,6 +231,17 @@
       </section>
 
       <section class="settings-section">
+        <h3>Harness 与插件更新</h3>
+        <ul class="help-list">
+          <li><strong>官方更新：</strong>先退出 Harness，在启动器中切换到原生模式并启动，再使用官方更新。新版安装完成后，旧插件记录需要重新适配；启动器会保留记录并停止跨版本覆盖。</li>
+          <li><strong>启用插件时更新：</strong>启动器无法拦截 Harness 内的更新或更新器自动重启。若已更新，请保留现场，避免强制还原旧补丁；先确认新版的干净安装，再记录兼容插件。</li>
+          <li><strong>普通插件更新：</strong>先在“补丁记录”中选择“升级 / 重新记录”，每次更新一个插件。更新共享依赖或其他插件时会暂停记录，避免把其他改动混入当前补丁。</li>
+          <li><strong>purge 更新：</strong>先在旧版本上恢复原生。purge 使用专用适配，不能走通用重新记录；新版需重新适配并建立快照。仅更新已停用的包且原生文件未变时，可继续使用原生模式。</li>
+        </ul>
+        <p class="small muted">检查或下载更新不会自动更换基线。校验失败时保留日志、快照和会话；清空缓存或修改版本号不能解决版本不兼容。</p>
+      </section>
+
+      <section class="settings-section">
         <h3>启动器后台</h3>
         <p class="small muted">关闭菜单窗口后，后台仍会运行并完成安装记录。再次打开菜单会复用后台，电脑休眠或网页暂停刷新不会让后台自动退出。</p>
         <div class="section-actions"><button id="quitMenu" class="button">退出启动器后台</button></div>

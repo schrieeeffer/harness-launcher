@@ -162,6 +162,21 @@ class RecordingStateTests(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(DomainError):
                 validate_registry({**value, **changed})
 
+    def test_update_guards_require_complete_pins_and_explicit_feature(self):
+        from recording_state import UPDATE_GUARDS
+        session = {**ready().to_dict(), 'hostArchives': {'archive': 'a' * 64,
+                   'archive_backup': None, 'parked_archive': None}, 'packagePins': {}}
+        registry = {'format': 3, 'records': {}, 'order': [], 'session': session,
+                    'requiredFeatures': [UPDATE_GUARDS]}
+        validate_registry(registry)
+        for changes in ({'requiredFeatures': []}, {'session': None},
+                        {'requiredFeatures': [UPDATE_GUARDS, UPDATE_GUARDS]},
+                        {'session': {**session, 'versions': None}},
+                        {'session': {**session, 'versions': {'another': '1'}}},
+                        {'session': {**session, 'hostArchives': {}}}):
+            with self.subTest(changes=changes), self.assertRaises(DomainError):
+                validate_registry({**registry, **changes})
+
 
 if __name__ == '__main__':
     unittest.main()

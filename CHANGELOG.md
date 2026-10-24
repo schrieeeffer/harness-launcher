@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Update lifecycle protection
+
+- Cover official updates from native and plugin configurations, interrupted updates, and plugin/dependency replacements without a version bump. Add a dedicated update guide inside Settings; the launcher does not intercept Harness's updater or its automatic restart.
+- Check all archive locations against the transaction cursor before any rollback writes, including ASAR-only updates and archive-move crash recovery. Preserve journals on unknown host changes.
+- Recheck selected packages, dependencies, configuration and host immediately before process creation. Report `plugin_identity_changed` with recovery steps for changes outside an installation recording.
+- Pin host archives and other installed plugin/dependency contents before recording an upgrade. Pause on mixed updates and retain recovery evidence; advertise `recording-update-guards` while the session exists so older clients cannot silently bypass these rules.
+- Allow native operation after an inactive purge package update if managed native files are unchanged. Enabling the adapter still checks its complete version and snapshot. Automatic cross-Harness migration and purge upgrade adaptation remain unsupported.
+
 ## 0.3.2 — 2026-10-24
 
 ### Plugin-switch verification performance

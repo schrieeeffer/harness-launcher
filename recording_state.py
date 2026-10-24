@@ -14,6 +14,10 @@ from typing import Mapping
 from domain import DomainError, PLUGIN_NAME, digest, natural, object_reference
 
 
+UPDATE_GUARDS = 'recording-update-guards'
+HOST_ARCHIVES = frozenset(('archive', 'archive_backup', 'parked_archive'))
+
+
 class RecordingPhase(StrEnum):
     PREPARING = 'preparing'
     INSTALLING = 'installing'
@@ -85,13 +89,16 @@ class RecordingSession:
     delta: str | None = None
     version: str | None = None
     count: int | None = None
+    host_archives: dict[str, str | None] | None = None
+    package_pins: dict[str, str] | None = None
 
     FIELDS = {'id': 'id', 'plugin': 'plugin', 'source': 'source', 'phase': 'phase',
               'started': 'started', 'hostHash': 'host_hash', 'initialInventory': 'initial_inventory',
               'baseSelection': 'base_selection', 'versions': 'versions', 'baseVersions': 'base_versions',
               'baseline': 'baseline', 'manifestBefore': 'manifest_before', 'installed': 'installed',
               'runState': 'run_state', 'launchAt': 'launch_at', 'error': 'error', 'after': 'after',
-              'delta': 'delta', 'version': 'version', 'count': 'count'}
+              'delta': 'delta', 'version': 'version', 'count': 'count',
+              'hostArchives': 'host_archives', 'packagePins': 'package_pins'}
 
     @classmethod
     def decode(cls, value):
@@ -116,6 +123,21 @@ class RecordingSession:
         _names(self.base_selection)
         _time(self.started)
         digest(self.host_hash)
+        if (self.host_archives is None) != (self.package_pins is None):
+            raise DomainError('安装会话的宿主和依赖更新保护必须成套记录。')
+        if self.host_archives is not None:
+            if not isinstance(self.host_archives, dict) or set(self.host_archives) != HOST_ARCHIVES:
+                raise DomainError('安装会话的宿主归档记录无效。')
+            for signature in self.host_archives.values():
+                if signature is not None:
+                    digest(signature)
+            if not isinstance(self.package_pins, dict) or self.plugin in self.package_pins:
+                raise DomainError('安装会话的基础插件记录无效。')
+            for name, reference in self.package_pins.items():
+                _name(name)
+                object_reference(reference, 'packages')
+            if not isinstance(self.versions, dict) or set(self.package_pins) != set(self.versions) - {self.plugin}:
+                raise DomainError('安装会话缺少其他插件的安装前内容记录。')
         object_reference(self.initial_inventory, 'snapshots')
         if not isinstance(self.source, str) or not isinstance(self.error, str) or type(self.installed) is not bool:
             raise DomainError('安装会话来源、错误或安装标识无效。')
@@ -236,7 +258,8 @@ def validate_registry(value):
     if not isinstance(value, dict) or type(value.get('format')) is not int or value['format'] != 3:
         raise DomainError('仅支持当前格式 3；旧数据需要离线导入。')
     features = value.get('requiredFeatures', [])
-    if not isinstance(features, list) or features:
+    if (not isinstance(features, list) or any(item != UPDATE_GUARDS for item in features)
+            or len(features) != len(set(features))):
         raise DomainError('登记表需要当前程序不支持的功能。')
     records, order = value.get('records'), value.get('order')
     if not isinstance(records, dict) or not isinstance(order, list):
@@ -267,7 +290,11 @@ def validate_registry(value):
     if 'session' not in value:
         raise DomainError('登记表缺少会话状态。')
     if value['session'] is not None:
-        RecordingSession.decode(value['session'])
+        session = RecordingSession.decode(value['session'])
+        if (UPDATE_GUARDS in features) != (session.host_archives is not None):
+            raise DomainError('安装会话的更新保护能力声明不匹配。')
+    elif UPDATE_GUARDS in features:
+        raise DomainError('没有安装会话时不能保留临时更新保护能力声明。')
     for key, kind in (('inventory', 'snapshots'), ('currentCombination', 'combinations')):
         if value.get(key) is not None:
             object_reference(value[key], kind)
