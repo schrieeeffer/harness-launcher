@@ -12,7 +12,7 @@
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.3.2%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.4.0%20preview-orange.svg)
 
 **简体中文** · [English](README.en.md)
 
@@ -22,6 +22,14 @@
 
 > [!NOTE]
 > 本项目由社区独立维护，与 DeepSeek 官方没有隶属关系。当前为**开发预览版**：仅 Windows 桌面版经过验证；macOS / Linux 尚未完成安装路径、进程检测与补丁适配，请不要在这些平台上使用。界面目前只有简体中文。
+
+## 下载即用（Windows x64）
+
+从 [0.4.0 Release](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.0) 下载 **Harness-Launcher-0.4.0-Windows-x64.zip**，完整解压后双击 **Harness Launcher.exe**。自带 Python，无需安装开发环境或输入命令。请先安装并打开一次 DeepSeek Harness 官方桌面版；本包不包含官方应用。
+
+已有用户先退出旧启动器后台，再解压新版到新文件夹。格式 3 数据继续使用；旧格式 2 仍需按下文迁移。保留 `.harness-launcher` 数据目录，里面有回滚材料。
+
+0.4.0 新增**统一更新检查、可恢复升级、可预览卸载、无引用缓存清理**，支持普通插件和 purge 的独立处理。见[维护指南](docs/plugin-maintenance.md)、[新功能截图](docs/feature-tour-0.4.0.md)、[测试与窗口实测](docs/validation-0.4.0.md)、[架构与校验原理图](docs/architecture.md)。升级下载与首次完整检查可能更慢；日常目标为本机约 30 秒，不是跨机器的硬上限。
 
 ## 目录
 

@@ -12,7 +12,7 @@ Choose which plugins to load on each launch, discover official and community plu
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Status: preview](https://img.shields.io/badge/status-0.3.2%20preview-orange.svg)
+![Status: preview](https://img.shields.io/badge/status-0.4.0%20preview-orange.svg)
 
 [简体中文](README.md) · **English**
 
@@ -22,6 +22,14 @@ Choose which plugins to load on each launch, discover official and community plu
 
 > [!NOTE]
 > This is an independent community project and is not affiliated with DeepSeek. It is a **developer preview**: only the Windows desktop app has been validated. Install paths, process detection and patch handling are not finished on macOS or Linux, so please do not use it there. The interface is currently Simplified Chinese only; this guide gives the Chinese label next to each control so you can match it to the screenshots.
+
+## Portable download (Windows x64)
+
+Download **Harness-Launcher-0.4.0-Windows-x64.zip** from the [0.4.0 Release](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.0), extract the entire archive and double-click **Harness Launcher.exe**. Python is bundled; no development tools or command line are required. Install and open the official DeepSeek Harness desktop application first; it is not included.
+
+Exit the old launcher backend before opening this build. Existing format 3 data remains usable; format 2 needs the migration described below. Keep the `.harness-launcher` data directory containing recovery materials.
+
+Version 0.4.0 adds source-bound update checks, checkpointed upgrades, uninstall previews and unreachable-object cleanup. See the [maintenance guide](docs/plugin-maintenance.md), [screenshots](docs/feature-tour-0.4.0.md), [validation](docs/validation-0.4.0.md) and [architecture](docs/architecture.md). Maintenance and first full checks can take longer; the local daily launch target is approximately 30 seconds, not a universal bound.
 
 ## Contents
 

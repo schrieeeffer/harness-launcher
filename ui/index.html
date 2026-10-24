@@ -55,6 +55,7 @@
     <nav class="side-nav" aria-label="插件与记录">
       <div class="side-label">插件</div>
       <button class="nav" id="catalogButton" title="浏览官方组合包与社区插件"><svg class="icon" aria-hidden="true"><use href="#i-compass"/></svg><span>发现插件</span></button>
+      <button class="nav" id="maintenanceButton"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span>更新与卸载</span></button>
       <button class="nav" id="addButton" title="从 npm、本地目录或 Git 仓库添加插件，全程自动记录文件变更"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span>手动添加</span><i id="addDot" class="nav-dot" title="有进行中的安装任务" hidden></i></button>
 
       <div class="side-label">记录与恢复</div>
@@ -201,6 +202,23 @@
     </form>
   </dialog>
 
+  <dialog id="maintenanceDialog" class="wide-dialog">
+    <div class="dialog-head"><div><h2>更新与卸载</h2><p class="dialog-desc">检查新版、预览改动、保留恢复点。</p><p id="maintenanceProgress" class="small muted" role="status" hidden></p></div><button class="close" data-close="maintenanceDialog" aria-label="关闭">×</button></div>
+    <div class="dialog-body">
+      <p class="small muted">更新检查不会影响启动速度。升级和卸载前请退出 Harness；首次完整检查及下载可能超过 30 秒。</p>
+      <div class="help-tools"><button id="checkUpdates" class="button primary">检查插件更新</button><button id="previewCleanup" class="button">预览缓存清理</button><button id="refreshMaintenance" class="button">刷新维护状态</button></div>
+      <p id="maintenanceStatus" role="status" class="small muted"></p>
+      <div id="maintenancePending" class="settings-section" hidden></div>
+      <div id="maintenanceList"></div>
+      <section class="settings-section"><h3>恢复检查点</h3><p class="small muted">保留旧插件、共享依赖和原始补丁。后续存在未验证改动时会停止恢复。</p><div id="maintenanceHistory"></div></section>
+    </div>
+  </dialog>
+  <dialog id="maintenancePreview" class="wide-dialog">
+    <div class="dialog-head"><h2 id="maintenancePreviewTitle">操作预览</h2><button class="close" data-close="maintenancePreview" aria-label="关闭">×</button></div>
+    <div class="dialog-body"><p id="maintenancePreviewText"></p><ul id="maintenancePreserved" class="help-list"></ul><p id="maintenanceBlocked" class="inline-error" hidden></p><pre id="maintenanceFiles" class="maintenance-files"></pre></div>
+    <div class="dialog-actions"><button class="button" data-close="maintenancePreview">取消</button><button id="maintenanceConfirm" class="button primary">确认执行</button></div>
+  </dialog>
+
   <dialog id="settingsDialog" class="wide-dialog">
     <div class="dialog-head">
       <div><h2>设置与说明</h2><p class="dialog-desc">确认 Harness 程序与数据目录，导入导出启动方案。</p></div>
@@ -235,8 +253,8 @@
         <ul class="help-list">
           <li><strong>官方更新：</strong>先退出 Harness，在启动器中切换到原生模式并启动，再使用官方更新。新版安装完成后，旧插件记录需要重新适配；启动器会保留记录并停止跨版本覆盖。</li>
           <li><strong>启用插件时更新：</strong>启动器无法拦截 Harness 内的更新或更新器自动重启。若已更新，请保留现场，避免强制还原旧补丁；先确认新版的干净安装，再记录兼容插件。</li>
-          <li><strong>普通插件更新：</strong>先在“补丁记录”中选择“升级 / 重新记录”，每次更新一个插件。更新共享依赖或其他插件时会暂停记录，避免把其他改动混入当前补丁。</li>
-          <li><strong>purge 更新：</strong>先在旧版本上恢复原生。purge 使用专用适配，不能走通用重新记录；新版需重新适配并建立快照。仅更新已停用的包且原生文件未变时，可继续使用原生模式。</li>
+          <li><strong>插件更新与卸载：</strong>在“更新与卸载”中统一检查版本，先看预览再执行。维护前保存可恢复检查点；升级后需要正常运行并退出，再完成验证。其他插件及共享依赖发生变化时会停止。</li>
+          <li><strong>purge 更新：</strong>使用专用维护流程，先校验并还原旧补丁，安装指定版本后重新应用并验证。新版必须声明适配当前 Harness；跨宿主版本不能沿用旧补丁。</li>
         </ul>
         <p class="small muted">检查或下载更新不会自动更换基线。校验失败时保留日志、快照和会话；清空缓存或修改版本号不能解决版本不兼容。</p>
       </section>

@@ -58,6 +58,38 @@ test('turning all plugins off stays a draft and does not disconnect or start any
   assert.equal(ui.calls.length, requests);
 });
 
+test('pending maintenance blocks launch without blocking access to recovery', async () => {
+  const ui = await app();
+  ui.state.maintenance = {pending: {name:'plugin-a', phase:'failed'}, history:[]};
+  const online = ui.respond;
+  ui.respond = path => path === 'maintenance' ? response(ui.state.maintenance) : online(path);
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('launch').disabled, true);
+  await ui.nodes.get('maintenanceButton').onclick();
+  assert.equal(ui.nodes.get('maintenanceDialog').open, true);
+  assert.match(ui.nodes.get('maintenancePending').textContent, /预览恢复/);
+});
+
+test('maintenance preview is read-only and execution uses the reviewed exact token', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = path => path === 'maintenance/preview'
+    ? response({token:'reviewed', files:[], blocked:[], message:'Preview'})
+    : path === 'maintenance' ? response({pending:null,history:[]}) : online(path);
+  await ui.run("previewPlugin('plugin-a', 'uninstall')");
+  assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/execute'), false);
+  await ui.nodes.get('maintenanceConfirm').onclick();
+  const writes = ui.calls.filter(c=>c.url==='/api/maintenance/execute');
+  assert.equal(writes.length, 1);
+  assert.deepEqual(JSON.parse(writes[0].body), {name:'plugin-a',action:'uninstall',token:'reviewed'});
+});
+
+test('a blocked maintenance preview cannot be confirmed in the UI', async () => {
+  const ui = await app();
+  ui.run("showMaintenancePreview('Preview', {message:'conflict',blocked:['shared dependency'],files:[]}, ()=>{})");
+  assert.equal(ui.nodes.get('maintenanceConfirm').disabled, true);
+  assert.match(ui.nodes.get('maintenanceBlocked').textContent, /shared dependency/);
+});
+
 test('offline state survives selection changes; reconnect reads actual state and keeps the draft', async () => {
   const ui = await app(); const online = ui.respond;
   ui.respond = () => {throw new TypeError('connection refused');};

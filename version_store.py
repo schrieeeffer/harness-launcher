@@ -92,10 +92,10 @@ class VersionStore:
                 raise PatchError('插件依赖缺少 package.json，无法保存完整版本：' + str(candidate))
         return None
 
-    def capture(self, name, source='', store=True, metadata=True):
+    def capture(self, name, source='', store=True, metadata=True, *, root=None):
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise PatchError('插件名称无效，无法保存版本。')
-        root = (self.profile / 'node_modules' / name).resolve()
+        root = Path(root).resolve() if root is not None else (self.profile / 'node_modules' / name).resolve()
         queue, ids, packages = [root], {root: '0'}, {}
         while queue:
             path = queue.pop(0)
@@ -210,6 +210,14 @@ class VersionStore:
                     self.store.blob_bytes(entry['hash'])
         for digest in expected.get('installMetadata', {}).values():
             self.store.blob_bytes(digest)
+
+    def verify_external_source(self, name, reference, root):
+        """Read-only check before restoring a local link; never overwrite its project."""
+        expected = self.store.read_object(reference)
+        actual = self.capture(name, expected.get('source', ''), store=False, metadata=False, root=root)
+        if actual != {k: v for k, v in expected.items() if k != 'installMetadata'}:
+            raise PatchError('原本地插件源项目已修改，已保留其内容并停止恢复链接：' + name,
+                             code='maintenance_conflict')
 
     def verify_record(self, name, record):
         revision = self.store.read_object(record['revision'])

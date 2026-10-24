@@ -1,11 +1,11 @@
 # Architecture and data contract / 架构与数据契约
 
-This describes the 0.3.2 implementation. Runtime control data uses format 3.
-本文说明 0.3.2 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.3.2.md)。
+This describes the 0.4.0 implementation. Runtime control data uses format 3.
+本文说明 0.4.0 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.0.md)。
 
 ## Architecture diagram / 架构图
 
-![0.3.2 模块架构图](images/architecture-0.3.2.svg)
+![0.4.0 模块架构图](images/architecture-0.4.0.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
@@ -13,6 +13,15 @@ This describes the 0.3.2 implementation. Runtime control data uses format 3.
 ```mermaid
 flowchart TB
     UI["浏览器：开关草稿、方案、启动进度"] --> API["HTTP API / Manager\n认证、运行状态、配置版本检查"]
+    API --> UP["UpdateCheck\n按来源查询，固定版本或提交；5 分钟缓存"]
+    API --> MT["Maintenance\n预览令牌、停止应用、固定宿主与共享依赖"]
+    MT --> CP["CheckpointFiles\n内容去重检查点、叶子级恢复、未知改动停止"]
+    MT --> INSTALL["还原旧层 → 官方安装器 → 首次运行验证\n普通差异 / purge 专用适配 → 恢复原组合"]
+    CP --> CS
+    API --> GC["CacheGC\n从组合、历史、方案、备份和恢复点标记引用"]
+    GC --> SWEEP["复核预览 → 校验无引用对象 → 宽限期后回收"]
+    SWEEP --> CS
+    PORT["Windows 便携入口\n自带 Python，不含 Harness 或用户数据"] --> UI
     API --> HOST["宿主内容边界检查\n程序 / 活动归档变化时提前拒绝"]
     HOST --> SP["SwitchPlan\n验证当前组合 / 规划并执行切换"]
     API --> PT["PluginTracking\n安装前后记录与版本约束"]
@@ -44,14 +53,16 @@ flowchart TB
 
 ## Verification principle / 校验原理图
 
-![0.3.2 校验分支与 NTFS 缓存原理图](images/verification-principle-0.3.2.svg)
+![0.4.0 校验分支与 NTFS 缓存原理图](images/verification-principle-0.4.0.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
 
 ```mermaid
 flowchart TD
-    A["启动或应用所选插件"] --> HOST{"宿主程序与归档仍匹配记录？"}
+    A["启动或应用所选插件"] --> IDLE{"维护事务已完成？"}
+    IDLE -->|否| WAIT["保留检查点；先验证或恢复"]
+    IDLE -->|是| HOST{"宿主程序与归档仍匹配记录？"}
     HOST -->|否| STOP["提示宿主变化，保留记录\n不创建备份、不扫描大目录、不覆盖新版本"]
     HOST -->|是| B{"请求启动且组合与配置未变化？"}
     B -->|是| C["重新验证在用文件、包与宿主\n不扫描未使用的暂存树"]
@@ -79,6 +90,16 @@ flowchart TD
     S -->|否或元信息不可用| READ["重新读取内容计算 SHA-256"]
     HIT --> CHECK["再次核对身份，关闭句柄\n元信息不可用时执行完整读取与采样复核"]
     READ --> CHECK
+    MAINT["用户明确发起维护 / 清理"] --> REVIEW["只读预览 + 版本令牌"]
+    REVIEW --> MUTEX["独占维护锁；重新验证宿主、目标与其他依赖"]
+    MUTEX --> SAVE["保存 before 内容检查点与持久日志"]
+    SAVE --> APPLY["还原旧补丁、安装或移除包、独立验证结果"]
+    APPLY --> SEALED["封存 expected 内容；保留恢复历史"]
+    SEALED --> RESTORE{"恢复时仍匹配 expected 或已恢复条目？"}
+    RESTORE -->|是| REPLAY["逐项校验并恢复 before；不递归删除未知文件"]
+    RESTORE -->|否| CONFLICT["保留现场，停止覆盖"]
+    REVIEW --> MARK["清理：递归标记全部恢复引用"]
+    MARK --> GCOK["候选无引用且超过 1 小时；复核令牌和内容后删除"]
     CHECK --> CLEAN["新哈希取得 CLOSE 屏障后才缓存\n以屏障后 USN 替换同一文件旧条目\n上限 100,000；不删除应用或恢复文件"]
 ```
 
@@ -107,6 +128,8 @@ own regression validation.
 | Runtime context / 路径上下文 | `runtime_context.py` | 不可变安装路径；基础模块不通过 Manager 反向寻找依赖 |
 | Observability / 操作状态 | `operations.py`, `errors.py` | 有界操作记录、稳定错误代码、恢复建议 |
 | Browser / 前端 | `ui/api.js`, `ui/state.js`, `ui/runtime.js`, `ui/app.js` | 请求传输、不可变状态与 reducer、异步调度、DOM 呈现与事件 |
+| Maintenance / 插件维护 | `maintenance.py`, `maintenance_files.py`, `update_check.py`, `cache_gc.py` | 来源检查、检查点、首次运行验证、预览恢复与无引用回收；不进入日常扫描路径 |
+| Distribution / 分发 | `packaging/Launcher.cs`, `packaging/build_portable.py` | 白名单打包、官方运行时哈希验证、无命令启动入口 |
 | Offline conversion / 离线迁移 | `migrate.py` | 在独立暂存目录转换和核验旧数据；运行时不导入该模块 |
 
 `ContentStore` does not know about plugins or `Manager`. `VersionStore` receives
@@ -206,7 +229,7 @@ callbacks cannot update a different operation.
 未启用的内置暂存树不会在此路径执行，真正切换时仍须完整预检。不能把时间戳缓存替代内容验证，
 也不能把此路径用于安装、还原或改变组合。
 
-0.3.2 adds an optional `preserveNative` transaction flag for ordinary plugin
+0.3.2 added an optional `preserveNative` transaction flag for ordinary plugin
 switches that leave the built-in adapter inactive. It requires identical input,
 previous and target adapter states, a native mode, no selected adapter, and no
 adapter mutation except the profile manifest. Such plans exclude unused parked
@@ -247,4 +270,4 @@ depend on application coordinators.
 测试必须使用临时合成安装目录；重点覆盖非法状态、内容损坏、事务中断和异步旧响应。
 `test_architecture.py` 自动检查运行时与离线迁移的隔离，以及领域、存储层的依赖边界。
 内容库按哈希去重并提供容量统计；迁移只清理已核验暂存目录中的不可达旧对象。
-运行时不自动删除历史；后续垃圾回收必须先证明完整引用可达性并单独测试，不能按文件年龄直接删除。
+运行时不自动删除历史。0.4.0 的按需清理先计算完整引用可达性，再筛选超过宽限期的无引用对象，不能仅按文件年龄删除。维护和清理的测试与边界见[维护指南](plugin-maintenance.md)。

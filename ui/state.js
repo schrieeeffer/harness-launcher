@@ -102,7 +102,7 @@ const LauncherState = (() => {
     const adapterManaged = patch && (patch.mode !== 'unmanaged' || server.plugins.some(plugin => plugin.id === patch.plugin));
     const patchChanged = Boolean(patch?.supported && (patch.pending || adapterManaged && patch.mode !== (ids.has(patch.plugin) ? 'plugin' : 'native')));
     const untracked = Boolean(server?.plugins.some(plugin => plugin.tracking === 'untracked' && plugin.id !== tracking?.session?.plugin));
-    const recording = Boolean(tracking?.session || tracking?.busy);
+    const recording = Boolean(tracking?.session || tracking?.busy || server?.maintenance?.pending);
     const connected = model.connection.status === 'online';
     const canSwitch = Boolean(server && connected && !model.operation.busy && !recording && !server.running && server.executableExists && !untracked);
     return {

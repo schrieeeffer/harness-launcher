@@ -36,7 +36,7 @@ from catalog import Catalog, CatalogError
 from verification_cache import VerifiedContentCache
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -198,6 +198,7 @@ class Manager:
         for key in ('home', 'executable'):
             self.settings[key] = str(Path(self.settings[key]).expanduser().resolve())
         self._track_cache = None
+        self._maintenance_cache = None
         # Establish the root schema before any tracking object can be created.
         # A first install must remain reopenable even if settings were never edited.
         if not self.settings_file.exists():
@@ -210,6 +211,14 @@ class Manager:
             if self._track_cache is None or self._track_cache[0] != identity:
                 self._track_cache = (identity, PluginTracking(self))
             return self._track_cache[1]
+
+    @property
+    def maintenance(self):
+        from maintenance import Maintenance
+        identity = (str(self.home), self.settings['executable'])
+        if self._maintenance_cache is None or self._maintenance_cache[0] != identity:
+            self._maintenance_cache = (identity, Maintenance(self))
+        return self._maintenance_cache[1]
 
     @property
     def home(self):
@@ -341,6 +350,7 @@ class Manager:
                     "backups": self.backup_list(), "patchApplied": applied and patch_mode['mode'] != 'native',
                     "patchMode": patch_mode,
                     "tracking": tracking,
+                    "maintenance": self.maintenance.summary(),
                     "data": str(self.data)}
 
     def validate_selection(self, selection, plugins):
@@ -742,6 +752,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, self.server.manager.state())
             if path == '/api/operations':
                 return self.reply(200, self.server.operations.snapshot())
+            if path == '/api/updates':
+                from update_check import UpdateCheck
+                return self.reply(200, UpdateCheck(self.server.manager, self.server.catalog).check())
+            if path == '/api/maintenance':
+                with self.server.manager.lock:
+                    self.server.manager.maintenance.observe()
+                    return self.reply(200, self.server.manager.maintenance.summary())
             if path == '/api/storage':
                 return self.reply(200, self.server.manager.tracking.store.statistics())
             if path == '/api/settings':
@@ -878,6 +895,25 @@ class Handler(BaseHTTPRequestHandler):
                 result = manager.configure(body.get("home"), body.get("executable"))
             elif path == "/api/import":
                 result = manager.import_schemes(body.get("schemes"))
+            elif path.startswith('/api/maintenance/'):
+                action = path.rsplit('/', 1)[-1]
+                service = manager.maintenance
+                if action == 'preview':
+                    result = service.preview(body.get('name'), body.get('action'), body.get('target'))
+                elif action == 'execute':
+                    result = service.start(body.get('name'), body.get('action'), body.get('token'), body.get('target'))
+                elif action == 'finish':
+                    result = service.finish()
+                elif action == 'recovery-preview':
+                    result = service.recovery(body.get('id'))[1]
+                elif action == 'restore':
+                    result = service.restore(body.get('token'), body.get('id'))
+                elif action in ('gc-preview', 'gc'):
+                    from cache_gc import CacheGC
+                    with manager.lock:
+                        result = CacheGC(manager).preview() if action == 'gc-preview' else CacheGC(manager).collect(body.get('token'))
+                else:
+                    raise MenuError('未知维护操作。')
             elif path.startswith('/api/tracking/'):
                 action = path.rsplit('/', 1)[-1]
                 tracker = manager.tracking
@@ -1041,6 +1077,11 @@ def serve(args, owned):
             while not monitor_stop.wait(1):
                 try:
                     server.manager.tracking.tick()
+                    if server.manager.lock.acquire(blocking=False):
+                        try:
+                            server.manager.maintenance.observe()
+                        finally:
+                            server.manager.lock.release()
                 except Exception:
                     logging.exception('Automatic installation supervisor failed; records retained')
 

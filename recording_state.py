@@ -258,7 +258,7 @@ def validate_registry(value):
     if not isinstance(value, dict) or type(value.get('format')) is not int or value['format'] != 3:
         raise DomainError('仅支持当前格式 3；旧数据需要离线导入。')
     features = value.get('requiredFeatures', [])
-    if (not isinstance(features, list) or any(item != UPDATE_GUARDS for item in features)
+    if (not isinstance(features, list) or any(item not in (UPDATE_GUARDS, 'maintenance-transaction') for item in features)
             or len(features) != len(set(features))):
         raise DomainError('登记表需要当前程序不支持的功能。')
     records, order = value.get('records'), value.get('order')

@@ -921,3 +921,8 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+/* Lifecycle dialogs reuse the launcher cards, with bounded file previews. */
+.maintenance-row { padding: 18px 0; border-bottom: 1px solid var(--border, #e1e5ef); }
+.maintenance-row strong { overflow-wrap: anywhere; }
+.maintenance-row .help-tools { margin-top: 10px; }
+.maintenance-files { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f6fa; border-radius: 12px; padding: 16px; font: 13px/1.7 Consolas, monospace; }

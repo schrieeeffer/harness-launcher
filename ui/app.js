@@ -483,4 +483,81 @@ store.subscribe((next, event) => {
   if (!model.server && model.connection.status !== 'checking') $('plugins').replaceChildren(element('div', 'empty', '尚未读取插件列表，请按上方提示恢复连接。'));
   updateSummary(); renderTracking();
 });
+const maintenanceUI = {updates: [], status: null, preview: null};
+function maintenanceAction(label, fn, disabled = false) {
+  const button = element('button', 'button', label); button.disabled = disabled || model.operation.busy;
+  button.onclick = () => act(fn); return button;
+}
+async function loadMaintenance() {
+  maintenanceUI.status = await api('maintenance');
+  await refresh(); renderMaintenance();
+}
+function renderMaintenance() {
+  const operation = model.operation.current;
+  $('maintenanceProgress').hidden = !model.operation.busy;
+  $('maintenanceProgress').textContent = operation ? (operation.progress?.label || '正在处理') + ' · ' + Math.floor(operation.durationMs / 1000) + ' 秒' : '正在读取维护状态…';
+  for (const id of ['checkUpdates', 'previewCleanup', 'refreshMaintenance']) $(id).disabled = model.operation.busy;
+  const pending = maintenanceUI.status?.pending;
+  $('maintenancePending').hidden = !pending; $('maintenancePending').replaceChildren();
+  if (pending) {
+    $('maintenancePending').append(element('h3', '', pending.name + ' · ' + ({waiting: '等待首次运行验证', failed: '维护未完成', installing: '安装中', restoring: '恢复中', prepared: '已保存检查点'}[pending.phase] || pending.phase)), element('p', 'small', pending.error || '正常使用新版并完全退出 Harness，再完成验证。'));
+    const actions = element('div', 'help-tools');
+    actions.append(maintenanceAction('完成首次运行验证', async () => { const result = await api('maintenance/finish', {}, 0); toast(result.message); await loadMaintenance(); }, pending.phase !== 'waiting' || model.server?.running),
+      maintenanceAction('预览恢复升级前', () => showRecovery(), model.server?.running));
+    $('maintenancePending').append(actions);
+  }
+  $('maintenanceList').replaceChildren();
+  for (const plugin of model.server?.plugins || []) {
+    const update = maintenanceUI.updates.find(row => row.name === plugin.id);
+    const row = element('div', 'maintenance-row');
+    row.append(element('strong', '', plugin.id + ' · ' + versionLabel(plugin.version)), element('p', 'small muted', update ? ({available: '可更新到 ' + versionLabel(update.latest), 'source-change': '可选择来源与版本', current: '已是最新', manual: '需要手动核实来源', error: '检查失败'}[update.status] || '') + '。' + (update.message || '') : '尚未检查更新'));
+    const actions = element('div', 'help-tools');
+    if (['available', 'source-change'].includes(update?.status)) actions.append(maintenanceAction('预览升级到 ' + update.latest, () => previewPlugin(plugin.id, 'upgrade', update.target), Boolean(pending)));
+    actions.append(maintenanceAction('预览卸载', () => previewPlugin(plugin.id, 'uninstall'), Boolean(pending)));
+    row.append(actions); $('maintenanceList').append(row);
+  }
+  $('maintenanceHistory').replaceChildren();
+  for (const item of maintenanceUI.status?.history || []) {
+    const row = element('div', 'maintenance-row');
+    row.append(element('strong', '', item.name + ' · ' + (item.action === 'upgrade' ? '升级前' : '卸载前')), element('p', 'small muted', new Date(item.at * 1000).toLocaleString() + (item.restored ? ' · 已恢复' : '')));
+    if (!item.restored) row.append(maintenanceAction('预览恢复', () => showRecovery(item.id), Boolean(pending) || model.server?.running));
+    $('maintenanceHistory').append(row);
+  }
+  if (!maintenanceUI.status?.history?.length) $('maintenanceHistory').append(element('p', 'small muted', '尚无维护恢复点。'));
+}
+function showMaintenancePreview(title, data, execute) {
+  $('maintenancePreviewTitle').textContent = title;
+  $('maintenancePreviewText').textContent = data.message;
+  $('maintenancePreserved').replaceChildren(...(data.preserved || []).map(text => element('li', '', '保留：' + text)));
+  $('maintenanceFiles').textContent = (data.files || []).slice(0, 300).map(item => typeof item === 'string' ? item : (item.action || item.store || '') + ' · ' + item.path).join('\n') || '没有需要还原的文件差异。';
+  if ((data.files || []).length > 300) $('maintenanceFiles').textContent += '\n另有 ' + (data.files.length - 300) + ' 项；执行前后台会重新核验全部项目。';
+  $('maintenanceBlocked').hidden = !data.blocked?.length;
+  $('maintenanceBlocked').textContent = (data.blocked || []).join('\n');
+  $('maintenanceConfirm').disabled = Boolean(data.blocked?.length);
+  $('maintenanceConfirm').onclick = () => act(async () => { $('maintenancePreview').close(); const result = await execute(); toast(result.message); await loadMaintenance(); });
+  $('maintenancePreview').showModal();
+}
+async function previewPlugin(name, action, target) {
+  const data = await api('maintenance/preview', {name, action, target});
+  showMaintenancePreview((action === 'upgrade' ? '升级预览 · ' : '卸载预览 · ') + name, data,
+    () => api('maintenance/execute', {name, action, target, token: data.token}, 0));
+}
+async function showRecovery(id) {
+  const data = await api('maintenance/recovery-preview', {id}, 0);
+  showMaintenancePreview('恢复检查点 · ' + data.count + ' 项', data,
+    () => api('maintenance/restore', {id, token: data.token}, 0));
+}
+$('maintenanceButton').onclick = () => act(async () => { $('maintenanceDialog').showModal(); await loadMaintenance(); });
+$('refreshMaintenance').onclick = () => act(loadMaintenance);
+$('checkUpdates').onclick = () => act(async () => {
+  $('maintenanceStatus').textContent = '正在查询安装来源…';
+  try { const data = await api('updates', undefined, 90000); maintenanceUI.updates = data.updates; $('maintenanceStatus').textContent = '检查完成 · ' + new Date(data.checkedAt * 1000).toLocaleString() + ' · 缓存 5 分钟'; renderMaintenance(); }
+  catch (error) { $('maintenanceStatus').textContent = '检查失败，可重试。'; throw error; }
+});
+$('previewCleanup').onclick = () => act(async () => {
+  const data = await api('maintenance/gc-preview', {}, 0);
+  showMaintenancePreview('清理预览 · ' + data.count + ' 个对象 · ' + (data.bytes / 1048576).toFixed(1) + ' MB', data,
+    () => api('maintenance/gc', {token: data.token}, 0));
+});
+store.subscribe((value, event) => { if ($('maintenanceDialog').open && ['operation/start', 'operation/observed', 'operation/end', 'state/received'].includes(event.type)) renderMaintenance(); });
 pollConnection();

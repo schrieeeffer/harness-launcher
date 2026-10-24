@@ -1,0 +1,139 @@
+{
+  "version": "0.4.0",
+  "date": "2026-10-24",
+  "host": "0.2.0-rc.2",
+  "plugins": {
+    "dsh-purge": "1.1.71",
+    "dsh-whale-widget": "0.4.2"
+  },
+  "method": "Native window captures with 2–3 second sampling intervals; first sparse follow-up has a wider observation gap. Full interface visually assessed; menu checked afterwards. These are observed upper bounds, not exact readiness events.",
+  "samples": [
+    {
+      "label": "release040-purge-daily",
+      "before": [
+        "dsh-purge"
+      ],
+      "selection": [
+        "dsh-purge"
+      ],
+      "backendSeconds": 4.029,
+      "fullInterfaceObservedBySeconds": 29.101,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    },
+    {
+      "label": "release040-purge-to-whale",
+      "before": [
+        "dsh-purge"
+      ],
+      "selection": [
+        "dsh-whale-widget"
+      ],
+      "backendSeconds": 10.729,
+      "fullInterfaceObservedBySeconds": 27.261,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    },
+    {
+      "label": "release040-whale-daily",
+      "before": [
+        "dsh-whale-widget"
+      ],
+      "selection": [
+        "dsh-whale-widget"
+      ],
+      "backendSeconds": 1.583,
+      "fullInterfaceObservedBySeconds": 20.761,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    },
+    {
+      "label": "release040-whale-to-both",
+      "before": [
+        "dsh-whale-widget"
+      ],
+      "selection": [
+        "dsh-purge",
+        "dsh-whale-widget"
+      ],
+      "backendSeconds": 10.164,
+      "fullInterfaceObservedBySeconds": 42.681,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    },
+    {
+      "label": "release040-both-daily-retest",
+      "before": [
+        "dsh-purge",
+        "dsh-whale-widget"
+      ],
+      "selection": [
+        "dsh-purge",
+        "dsh-whale-widget"
+      ],
+      "backendSeconds": 4.392,
+      "fullInterfaceObservedBySeconds": 28.512,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    },
+    {
+      "label": "release040-both-to-whale-retest",
+      "before": [
+        "dsh-purge",
+        "dsh-whale-widget"
+      ],
+      "selection": [
+        "dsh-whale-widget"
+      ],
+      "backendSeconds": 10.374,
+      "fullInterfaceObservedBySeconds": 25.884,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    },
+    {
+      "label": "release040-whale-to-both-retest",
+      "before": [
+        "dsh-whale-widget"
+      ],
+      "selection": [
+        "dsh-purge",
+        "dsh-whale-widget"
+      ],
+      "backendSeconds": 10.019,
+      "fullInterfaceObservedBySeconds": 35.119,
+      "menuResponseConfirmedAfterCapture": true,
+      "launched": true
+    }
+  ],
+  "otherObservations": [
+    {
+      "label": "release040-both-to-purge",
+      "backendSeconds": 7.505,
+      "homeObservedBySeconds": 30.203,
+      "note": "Home rendered; complete conversation time was not captured within this sampling window."
+    },
+    {
+      "label": "release040-cache-purge-to-both",
+      "backendSeconds": 7.654,
+      "noWindowObservedThroughSeconds": 52.11,
+      "note": "Environment-only Node compile cache experiment; not adopted; original environment restored."
+    }
+  ],
+  "localPython": {
+    "total": 384,
+    "passed": 382,
+    "skipped": 2,
+    "failed": 0,
+    "seconds": 906.612
+  },
+  "javascript": {
+    "passed": 35,
+    "failed": 0
+  },
+  "gcPreview": {
+    "count": 68,
+    "bytes": 188163101,
+    "seconds": 68.557,
+    "executed": false
+  }
+}

@@ -323,6 +323,7 @@ class PluginTracking:
 
     def verify_idle(self, check_files=False):
         """Read-only inspection; never recover a transaction as a side effect."""
+        self.manager.maintenance.require_idle()
         if (self.root / 'switch.json').exists():
             raise TrackingError('组合切换尚未完成，请通过正常启动器操作恢复；只读检查不会修改文件。')
         value = self.load()
