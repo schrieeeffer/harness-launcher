@@ -28,6 +28,9 @@ function tone(id) { let h = 2166136261; for (const c of id) h = Math.imul(h ^ c.
 // The toast is a popover so it renders above open modal dialogs; re-showing moves it to the top again.
 function toast(message, error = false) { clearTimeout(timer); const t = $('toast'); t.textContent = message; t.className = 'toast' + (error ? ' error' : ''); if (t.matches(':popover-open')) t.hidePopover(); t.showPopover(); timer = setTimeout(() => t.hidePopover(), error ? 8500 : 5000); }
 function renderConnection() {
+  const health = model.server?.runtimeHealth;
+  $('runtimeWarning').hidden = !health || health.status === 'ready';
+  $('runtimeWarningText').textContent = health?.message || '';
   const messages = {
     checking: ['正在连接启动器', '正在读取实际配置，请稍候。'],
     offline: ['无法连接启动器后台', '请先点击「重新连接」。如果仍无法连接，请重新双击桌面快捷方式或项目里的 launch.vbs，并使用新打开的菜单。本页勾选会暂时保留；连接恢复后会重新读取实际配置。'],
@@ -408,7 +411,7 @@ $('boardRetry').onclick = loadBoard;
 $('pluginDetailDialog').addEventListener('close', () => {if ($('pluginDetailDialog').open) return; detailRequest++; detailAbort?.abort();});
 $('detailAdd').onclick = () => {if (!currentDetail || $('detailAdd').disabled) return; const chosen = currentDetail; openAdd(chosen.name, chosen.source, model.server?.plugins.find(p => p.id === chosen.name)?.tracking === 'auto'); toast('已填入插件和来源。检查后点击「安装并打开 Harness」，还原记录会自动保存。');};
 async function openSettings() {let paths = model.server; if (!paths) {try {paths = await api('settings');} catch (_) {paths = {};}} $('exePath').value = paths?.executable || ''; $('homePath').value = paths?.home || ''; $('settingsError').hidden = true; $('settingsDialog').showModal(); }
-$('settingsButton').onclick = openSettings; $('exeSettings').onclick = openSettings;
+$('settingsButton').onclick = openSettings; $('exeSettings').onclick = openSettings; $('runtimeSettings').onclick = openSettings;
 $('detectExe').onclick = async () => {try {const found = (await api('settings')).detected; if (found) {$('exePath').value = found; toast('已检测到 Harness：' + found + '。确认后点击「保存路径设置」。');} else toast('没有在安装登记和常见目录中找到 Harness，请手动填写 DeepSeek Harness.exe 的完整路径。', true);} catch (error) {toast(error.message, true);}};
 $('useDetected').onclick = () => act(async () => {const result = await api('settings', {executable: model.server.detectedExecutable, home: model.server.home}); await refresh(true); toast(result.message);});
 $('settingsForm').onsubmit = async event => {event.preventDefault(); await act(async () => { try {const result = await api('settings', {executable: $('exePath').value.trim(), home: $('homePath').value.trim()}); await refresh(true); toast(result.message); $('settingsDialog').close();} catch (e) {$('settingsError').textContent = e.message; $('settingsError').hidden = false;} });};
@@ -560,4 +563,48 @@ $('previewCleanup').onclick = () => act(async () => {
     () => api('maintenance/gc', {token: data.token}, 0));
 });
 store.subscribe((value, event) => { if ($('maintenanceDialog').open && ['operation/start', 'operation/observed', 'operation/end', 'state/received'].includes(event.type)) renderMaintenance(); });
+
+let runtimeRepairPlan = null;
+function renderRuntimeRepair() {
+  const busy = model.operation.busy;
+  for (const id of ['runtimeCheck', 'runtimePrepare', 'runtimeDiscard', 'runtimeInstaller', 'runtimeChecksum']) $(id).disabled = busy;
+  $('runtimeExecute').hidden = !runtimeRepairPlan;
+  $('runtimeDiscard').hidden = !runtimeRepairPlan;
+  $('runtimeExecute').disabled = busy || !runtimeRepairPlan?.missing?.length || Boolean(runtimeRepairPlan?.blocked?.length);
+  const operation = model.operation.current;
+  $('runtimeRepairProgress').hidden = !busy;
+  $('runtimeRepairProgress').textContent = operation ? (operation.progress?.label || '正在处理') + ' · ' + Math.floor((operation.durationMs || 0) / 1000) + ' 秒' : '等待后台响应…';
+}
+$('runtimeCheck').onclick = () => act(async () => {
+  const result = await api('runtime/status'); $('runtimeRepairStatus').textContent = result.message;
+});
+$('runtimePrepare').onclick = () => act(async () => {
+  runtimeRepairPlan = null; renderRuntimeRepair(); $('runtimeRepairFiles').hidden = true;
+  $('runtimeRepairStatus').textContent = '正在验证官方安装包和文件；完成后可预览，不会修改安装目录。';
+  try {
+    runtimeRepairPlan = await api('runtime/prepare', {installer: $('runtimeInstaller').value.trim() || undefined, sha512: $('runtimeChecksum').value.trim() || undefined}, 0);
+    $('runtimeRepairStatus').textContent = runtimeRepairPlan.message + ' 版本：' + runtimeRepairPlan.version;
+    const lines = [...runtimeRepairPlan.missing.map(p => '缺失 · ' + p), ...runtimeRepairPlan.conflicts.map(p => '冲突（不会覆盖） · ' + p)];
+    $('runtimeRepairFiles').textContent = lines.slice(0, 150).join('\n') + (lines.length > 150 ? '\n另有 ' + (lines.length - 150) + ' 项；后台将校验全部文件。' : '');
+    $('runtimeRepairFiles').hidden = !lines.length;
+  } catch (error) { $('runtimeRepairStatus').textContent = error.message; throw error; }
+  finally { renderRuntimeRepair(); }
+});
+$('runtimeExecute').onclick = () => act(async () => {
+  if (!runtimeRepairPlan || runtimeRepairPlan.blocked?.length || !runtimeRepairPlan.missing.length) return;
+  try {
+    const result = await api('runtime/execute', {token: runtimeRepairPlan.token}, 0);
+    runtimeRepairPlan = result.cleanupPending ? {...runtimeRepairPlan, missing: []} : null; $('runtimeRepairStatus').textContent = result.message; $('runtimeRepairFiles').hidden = true;
+    toast(result.message); await refresh();
+  } catch (error) {
+    $('runtimeRepairStatus').textContent = error.message + ' 已有文件未被覆盖；中断后请重新完整检查再继续。';
+    if (runtimeRepairPlan) runtimeRepairPlan.blocked = [error.message];
+    throw error;
+  } finally { renderRuntimeRepair(); }
+});
+$('runtimeDiscard').onclick = () => act(async () => {
+  const result = await api('runtime/discard', {}); runtimeRepairPlan = null;
+  $('runtimeRepairStatus').textContent = result.message; $('runtimeRepairFiles').hidden = true; renderRuntimeRepair();
+});
+store.subscribe(() => renderRuntimeRepair());
 pollConnection();

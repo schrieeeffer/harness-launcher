@@ -104,12 +104,13 @@ const LauncherState = (() => {
     const untracked = Boolean(server?.plugins.some(plugin => plugin.tracking === 'untracked' && plugin.id !== tracking?.session?.plugin));
     const recording = Boolean(tracking?.session || tracking?.busy || server?.maintenance?.pending);
     const connected = model.connection.status === 'online';
+    const runtimeReady = !server?.runtimeHealth || server.runtimeHealth.status === 'ready';
     const canSwitch = Boolean(server && connected && !model.operation.busy && !recording && !server.running && server.executableExists && !untracked);
     return {
       selection, changed, patchChanged, untracked, recording, connected,
-      canLaunch: canSwitch, canApply: canSwitch && (changed || patchChanged), canRestore: canSwitch,
+      canLaunch: canSwitch && runtimeReady, canApply: canSwitch && (changed || patchChanged), canRestore: canSwitch,
       canSaveScheme: Boolean(server && connected && !model.operation.busy),
-      canBeginTracking: Boolean(server && connected && !model.operation.busy && !recording && !server.running && server.executableExists && !untracked),
+      canBeginTracking: Boolean(server && connected && !model.operation.busy && !recording && !server.running && server.executableExists && !untracked && runtimeReady),
       canManageTracking: connected && !model.operation.busy && !tracking?.busy && !server?.running,
       canQuit: ['online', 'error'].includes(model.connection.status) && !model.operation.busy && !tracking?.busy && !(tracking?.session && !tracking.session.error)
     };

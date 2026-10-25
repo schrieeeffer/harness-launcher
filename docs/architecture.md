@@ -1,11 +1,11 @@
 # Architecture and data contract / 架构与数据契约
 
-This describes the 0.4.0 implementation. Runtime control data uses format 3.
-本文说明 0.4.0 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.0.md)。
+This describes the 0.4.1 implementation. Runtime control data uses format 3.
+本文说明 0.4.1 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.0.md)。
 
 ## Architecture diagram / 架构图
 
-![0.4.0 模块架构图](images/architecture-0.4.0.svg)
+![当前模块架构图](images/architecture-0.4.0.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
@@ -14,6 +14,9 @@ This describes the 0.4.0 implementation. Runtime control data uses format 3.
 flowchart TB
     UI["浏览器：开关草稿、方案、启动进度"] --> API["HTTP API / Manager\n认证、运行状态、配置版本检查"]
     API --> UP["UpdateCheck\n按来源查询，固定版本或提交；5 分钟缓存"]
+    API --> RT["RuntimeRepair\n启动前必需文件探测 / 显式完整检查"]
+    RT --> PK["同版本官方包\n签名 + 发布者 + SHA-512 + EXE/ASAR 内容一致"]
+    PK --> ADD["缺失/冲突预览 → 复核 → 仅补缺失\n独立 SHA-256 验证；不改插件与用户数据"]
     API --> MT["Maintenance\n预览令牌、停止应用、固定宿主与共享依赖"]
     MT --> CP["CheckpointFiles\n内容去重检查点、叶子级恢复、未知改动停止"]
     MT --> INSTALL["还原旧层 → 官方安装器 → 首次运行验证\n普通差异 / purge 专用适配 → 恢复原组合"]
@@ -53,14 +56,24 @@ flowchart TB
 
 ## Verification principle / 校验原理图
 
-![0.4.0 校验分支与 NTFS 缓存原理图](images/verification-principle-0.4.0.svg)
+![当前校验分支与 NTFS 缓存原理图](images/verification-principle-0.4.0.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
 
 ```mermaid
 flowchart TD
-    A["启动或应用所选插件"] --> IDLE{"维护事务已完成？"}
+    A["启动或应用所选插件"] --> WILLRUN{"本次需要启动应用？"}
+    WILLRUN -->|是| READY{"必需运行时文件存在且非空？"}
+    WILLRUN -->|否| IDLE
+    READY -->|是| IDLE{"维护事务已完成？"}
+    READY -->|否| FIX["设置中显式完整检查\n默认使用官方更新缓存"]
+    FIX --> AUTH["签名、SHA-512、EXE/ASAR 一致\n逐文件建立官方 SHA-256 清单"]
+    AUTH --> DIFF{"现有文件与官方内容冲突？"}
+    DIFF -->|是| KEEP["停止；保留已有文件和补丁记录"]
+    DIFF -->|否| PREVIEW["预览缺失 → 用户执行 → 再次核验"]
+    PREVIEW --> REPAIR["原子补齐缺失文件；从不覆盖\n中断后重新检查继续；完整核验成功"]
+    REPAIR --> A
     IDLE -->|否| WAIT["保留检查点；先验证或恢复"]
     IDLE -->|是| HOST{"宿主程序与归档仍匹配记录？"}
     HOST -->|否| STOP["提示宿主变化，保留记录\n不创建备份、不扫描大目录、不覆盖新版本"]

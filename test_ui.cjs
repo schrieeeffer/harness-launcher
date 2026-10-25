@@ -467,3 +467,36 @@ test('apply-only control explains that toggles do not immediately modify Harness
   ui.nodes.get('selectNone').onclick();
   assert.equal(ui.nodes.get('apply').textContent, '仅还原，不启动');
 });
+test('runtime missing disables launch but keeps settings repair accessible', async () => {
+  const ui = await app();
+  ui.state.runtimeHealth = {status: 'missing', message: 'missing official runtime', missing: ['SKILL.md']};
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('launch').disabled, true);
+  assert.equal(ui.nodes.get('runtimeWarning').hidden, false);
+  await ui.nodes.get('runtimeSettings').onclick();
+  assert.equal(ui.nodes.get('settingsDialog').open, true);
+});
+
+test('runtime preview never repairs automatically and conflicts disable execution', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = (path, options) => path === 'runtime/prepare' ? response({token: 'p1', version:'0.2.1-rc.3', message:'conflicts', missing:['a'], conflicts:['b'], blocked:['changed']}) : online(path, options);
+  await ui.nodes.get('runtimePrepare').onclick();
+  assert.equal(ui.nodes.get('runtimeExecute').disabled, true);
+  assert.match(ui.nodes.get('runtimeRepairFiles').textContent, /不会覆盖/);
+  await ui.nodes.get('runtimeExecute').onclick();
+  assert.equal(ui.calls.filter(c=>c.url.includes('runtime/execute')).length, 0);
+});
+
+test('runtime repair requires preview token and clears preview after successful commit', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = (path, options) => path === 'runtime/prepare' ? response({token:'p2', version:'0.2.1-rc.3', message:'verified', missing:['a'], conflicts:[], blocked:[]})
+    : path === 'runtime/execute' ? response({message:'restored', restored:1}) : online(path, options);
+  await ui.nodes.get('runtimePrepare').onclick();
+  assert.equal(ui.nodes.get('runtimeExecute').disabled, false);
+  assert.equal(ui.calls.filter(c=>c.url.includes('runtime/execute')).length, 0);
+  await ui.nodes.get('runtimeExecute').onclick();
+  const calls = ui.calls.filter(c=>c.url.includes('runtime/execute'));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].body), {token:'p2'});
+  assert.equal(ui.nodes.get('runtimeExecute').hidden, true);
+});

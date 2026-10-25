@@ -111,6 +111,8 @@ class PatchModeTests(unittest.TestCase):
         self.cli = self.resources / 'runtime' / 'cli' / 'bin' / 'dsh.cmd'
         self.cli.parent.mkdir(parents=True)
         self.cli.write_bytes(b'ELECTRON_RUN_AS_NODE dsh-desktop-host \\app.asar\\file.js')
+        from test_launcher import make_runtime
+        make_runtime(self.exe)
         self.manager = Manager(self.root / 'data', self.home, self.exe)
         self.process_patch = patch('launcher.running_harness', return_value=[])
         self.process_patch.start()

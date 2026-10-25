@@ -88,6 +88,11 @@
 
       <div id="inlineError" class="inline-error alert" role="alert" hidden></div>
 
+      <section id="runtimeWarning" class="notice danger connection-warning" role="alert" hidden>
+        <div><strong>官方运行时需要检查</strong><p id="runtimeWarningText"></p></div>
+        <button id="runtimeSettings" class="button">检查与修复</button>
+      </section>
+
       <section id="connectionWarning" class="notice danger connection-warning" role="alert" hidden>
         <svg class="icon notice-icon" aria-hidden="true"><use href="#i-alert"/></svg>
         <div><strong id="connectionTitle"></strong><p id="connectionText"></p></div>
@@ -257,6 +262,19 @@
           <li><strong>purge 更新：</strong>使用专用维护流程，先校验并还原旧补丁，安装指定版本后重新应用并验证。新版必须声明适配当前 Harness；跨宿主版本不能沿用旧补丁。</li>
         </ul>
         <p class="small muted">检查或下载更新不会自动更换基线。校验失败时保留日志、快照和会话；清空缓存或修改版本号不能解决版本不兼容。</p>
+      </section>
+
+      <section class="settings-section">
+        <h3>官方运行时修复</h3>
+        <p>更新后提示 SKILL.md、Python 或其他运行时文件缺失时，先完全退出 Harness，再检查。默认读取官方更新缓存，也可指定同版本官方安装包。</p>
+        <label class="field">官方安装包路径（可留空）<input id="runtimeInstaller" placeholder="留空使用官方更新缓存"></label>
+        <label class="field">安装包 SHA-512（手动指定安装包时必填）<input id="runtimeChecksum" placeholder="官方提供的 Base64 或十六进制 SHA-512"></label>
+        <div class="help-tools"><button id="runtimeCheck" class="button">快速检查</button><button id="runtimePrepare" class="button">完整检查并预览修复</button></div>
+        <p id="runtimeRepairStatus" class="small" role="status">日常只检查必需文件，完整检查和修复可能需要数分钟。</p>
+        <p id="runtimeRepairProgress" class="small muted" role="status" hidden></p>
+        <pre id="runtimeRepairFiles" class="small runtime-repair-files" hidden></pre>
+        <div class="help-tools"><button id="runtimeExecute" class="button primary" hidden>补齐缺失文件</button><button id="runtimeDiscard" class="button" hidden>取消并清理临时文件</button></div>
+        <p class="small muted">验证 DeepSeek 发布者签名、SHA-512、主程序及 app.asar 一致性。只补齐缺失文件；已有文件不同就停止，不覆盖插件改动。账号、会话、工作区及回滚记录不参与修复。需要已安装的 <a href="https://www.7-zip.org/" target="_blank" rel="noopener noreferrer">7-Zip</a>。修复不会自动启动应用。</p>
       </section>
 
       <section class="settings-section">

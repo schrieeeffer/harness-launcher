@@ -34,9 +34,10 @@ from plugin_tracking import PluginTracking
 from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
 from verification_cache import VerifiedContentCache
+from runtime_repair import RuntimeRepair
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -197,6 +198,7 @@ class Manager:
             self.settings[key] = str(Path(self.settings[key]).expanduser().resolve())
         self._track_cache = None
         self._maintenance_cache = None
+        self._runtime_repair_cache = None
         # Establish the root schema before any tracking object can be created.
         # A first install must remain reopenable even if settings were never edited.
         if not self.settings_file.exists():
@@ -217,6 +219,16 @@ class Manager:
         if self._maintenance_cache is None or self._maintenance_cache[0] != identity:
             self._maintenance_cache = (identity, Maintenance(self))
         return self._maintenance_cache[1]
+
+    @property
+    def runtime_repair(self):
+        with self.lock:
+            identity = self.settings['executable']
+            if self._runtime_repair_cache is None or self._runtime_repair_cache[0] != identity:
+                if self._runtime_repair_cache is not None:
+                    self._runtime_repair_cache[1].discard()
+                self._runtime_repair_cache = (identity, RuntimeRepair(self))
+            return self._runtime_repair_cache[1]
 
     @property
     def home(self):
@@ -342,6 +354,7 @@ class Manager:
                     "running": bool(running_harness()), "home": str(self.home),
                     "profile": str(self.profile), "executable": self.settings["executable"],
                     "executableExists": exists,
+                    "runtimeHealth": self.runtime_repair.status(),
                     "detectedExecutable": str(detected) if detected else None,
                     "schemes": self.settings["schemes"], "lastSelection": self.settings["lastSelection"],
                     "schemeLocks": self.settings.get("schemeLocks", {}),
@@ -420,6 +433,9 @@ class Manager:
         with self.lock, self.verification_cache.session():
             report_progress('check', '检查运行状态与插件选择')
             self.require_stopped()
+            self.require_executable()
+            if launch:
+                self.runtime_repair.require_ready()
             try:
                 self.tracking.guard()
             except PatchError as exc:
@@ -763,6 +779,9 @@ class Handler(BaseHTTPRequestHandler):
                 manager = self.server.manager
                 return self.reply(200, {'home': str(manager.home), 'executable': manager.settings['executable'],
                                         'detected': str(detect_executable() or '')})
+            if path == '/api/runtime/status':
+                with self.server.manager.lock:
+                    return self.reply(200, self.server.manager.runtime_repair.status())
             if path == "/api/ping":
                 return self.reply(200, {"running": bool(running_harness())})
             if path == '/api/tracking':
@@ -893,6 +912,18 @@ class Handler(BaseHTTPRequestHandler):
                 result = manager.configure(body.get("home"), body.get("executable"))
             elif path == "/api/import":
                 result = manager.import_schemes(body.get("schemes"))
+            elif path.startswith('/api/runtime/'):
+                service = manager.runtime_repair
+                action = path.rsplit('/', 1)[-1]
+                if action == 'prepare':
+                    result = service.prepare(body.get('installer'), body.get('sha512'))
+                elif action == 'execute':
+                    result = service.execute(body.get('token'))
+                elif action == 'discard':
+                    with manager.lock:
+                        result = service.discard()
+                else:
+                    raise MenuError('未知运行时修复操作。')
             elif path.startswith('/api/maintenance/'):
                 action = path.rsplit('/', 1)[-1]
                 service = manager.maintenance

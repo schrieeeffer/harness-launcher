@@ -467,6 +467,7 @@ class PluginTracking:
         with self.manager.lock:
             self.manager.require_stopped()
             self.manager.require_executable()
+            self.manager.runtime_repair.require_ready()
             self.guard(check_files=True)
             if not isinstance(name, str) or not PLUGIN_NAME.fullmatch(name) or is_adapter(name):
                 raise TrackingError('请输入有效的新插件包名。内置适配插件使用专用还原机制。')
@@ -577,6 +578,7 @@ class PluginTracking:
         with self.manager.lock:
             self.manager.require_stopped()
             self.manager.require_executable()
+            self.manager.runtime_repair.require_ready()
             value = self.load()
             session = value.get('session')
             if not session or session['phase'] != 'recording' or not session.get('baseline'):

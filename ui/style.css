@@ -926,3 +926,4 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 .maintenance-row strong { overflow-wrap: anywhere; }
 .maintenance-row .help-tools { margin-top: 10px; }
 .maintenance-files { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f6fa; border-radius: 12px; padding: 16px; font: 13px/1.7 Consolas, monospace; }
+ .runtime-repair-files { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }

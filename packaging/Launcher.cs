@@ -5,8 +5,8 @@ using System.Reflection;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Harness Launcher")]
-[assembly: AssemblyVersion("0.4.0.0")]
-[assembly: AssemblyFileVersion("0.4.0.0")]
+[assembly: AssemblyVersion("0.4.1.0")]
+[assembly: AssemblyFileVersion("0.4.1.0")]
 internal static class Launcher {
     [STAThread]
     private static void Main() {

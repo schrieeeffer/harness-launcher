@@ -1,14 +1,16 @@
 # Harness Launcher
 
-A local plugin launcher and maintenance UI for DeepSeek Harness. Current release: **0.4.0**, Windows x64 preview. Independently maintained, not affiliated with DeepSeek.
+A local plugin launcher and maintenance UI for DeepSeek Harness. Current release: **0.4.1**, Windows x64 preview. Independently maintained, not affiliated with DeepSeek.
 
-[简体中文 / complete usage guide](README.md) · [Download](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.0) · [Screenshots](docs/feature-tour-0.4.0.md) · [Validation](docs/validation-0.4.0.md)
+[简体中文 / complete usage guide](README.md) · [Download](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.1) · [Screenshots](docs/feature-tour-0.4.0.md) · [Runtime recovery](docs/runtime-repair.md) · [Validation](docs/validation-0.4.0.md)
 
 ![Launcher](docs/images/feature-tour-0.4.0/01-overview.png)
 
 ## Get started
 
-Install and open official Harness once. Download `Harness-Launcher-0.4.0-Windows-x64.zip`, extract the complete archive and double-click `Harness Launcher.exe`. Python is bundled. Set the Harness executable in Settings if detection fails. The EXE is unsigned; download from this repository and verify `SHA256SUMS.txt` if needed.
+Install and open official Harness once. Download `Harness-Launcher-0.4.1-Windows-x64.zip`, extract the complete archive and double-click `Harness Launcher.exe`. Python is bundled. Set the Harness executable in Settings if detection fails. The EXE is unsigned; download from this repository and verify `SHA256SUMS.txt` if needed.
+
+If an official update leaves runtime files missing, open **Settings → Official runtime repair**. Close Harness, verify the same-version official installer, review the missing files and repair. Installed 7-Zip is required. Authenticode publisher checks and SHA-512 precede extraction; installed EXE/ASAR hash comparisons precede repair approval. Repair only adds absent files and refuses conflicting existing contents. It preserves profiles, conversations, plugin records and rollback data. Complete checks are explicit and may take several minutes; daily launch checks only a few mandatory files.
 
 For source use, Python 3.12+ is required: open `launch.vbs` or run `python launcher.py`. Source uses only the Python standard library. The interface is in Simplified Chinese.
 

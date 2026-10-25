@@ -100,7 +100,7 @@ class GenericHostUpdateTests(unittest.TestCase):
 
     def test_generic_recorded_archive_is_compared_to_current_not_native_base(self):
         tracker = self.manager.tracking
-        tracker.core.resources.mkdir()
+        tracker.core.resources.mkdir(exist_ok=True)
         adapter.make_asar(tracker.core.archive)
         self.manager.apply(['plugin-a'], self.manager.state()['revision'])
         value = tracker.load()
@@ -340,7 +340,7 @@ class GenericPackageUpdateTests(unittest.TestCase):
 
     def test_configuration_only_rollback_rejects_asar_update(self):
         tracker = self.manager.tracking
-        tracker.core.resources.mkdir()
+        tracker.core.resources.mkdir(exist_ok=True)
         adapter.make_asar(tracker.core.archive)
         self.manager.apply(['plugin-a'], self.manager.state()['revision'])
         from switch_plan import SwitchPlan

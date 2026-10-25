@@ -14,12 +14,12 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.4.0'
+VERSION = '0.4.1'
 PYTHON = '3.13.17'
 RUNTIME_SHA = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
 MODULES = '''adapters bootstrap.ps1 cache_gc catalog domain errors file_view launch.vbs launcher maintenance
 maintenance_files ntfs_journal operation_models operations patch_modes plugin_tracking
-recording_state runtime_context settings_store storage switch_plan tree_checkpoint update_check
+recording_state runtime_context runtime_repair settings_store storage switch_plan tree_checkpoint update_check
 verification_cache version_store'''.split()
 
 
@@ -53,13 +53,16 @@ def build():
     shutil.copytree(ROOT / 'docs', stage / 'docs')
     for name in ('README.md', 'README.en.md', 'LICENSE', 'CHANGELOG.md'):
         shutil.copyfile(ROOT / name, stage / name)
-    quickstart = '''Harness Launcher 0.4.0 — Windows 10/11 64 位便携版
+    quickstart = '''Harness Launcher 0.4.1 — Windows 10/11 64 位便携版
 
 1. 先安装并至少打开一次 DeepSeek Harness 官方桌面版。
 2. 将本 ZIP 完整解压到你自己的文件夹，例如 D:\\Apps\\HarnessLauncher。
 3. 双击 Harness Launcher.exe。不需要安装 Python，也不需要输入命令。
 4. 若未找到 Harness，在“设置与说明”中点击“自动检测”，或填写应用路径。
 5. 日常选择插件后点击“启动 Harness”。更新、卸载、恢复和清理在“更新与卸载”中。
+6. 官方更新后运行时缺失：进入“设置与说明 → 官方运行时修复”。完全退出 Harness，
+   完整检查并预览，再补齐缺失文件。默认使用官方更新缓存；需安装 7-Zip。
+   签名、安装包哈希和宿主身份必须全部匹配，已有文件不同会停止，不覆盖插件改动。
 
 更新启动器：先退出旧启动器后台，解压新版到新文件夹后打开。
 配置与恢复数据保存在用户目录 .harness-launcher，不在程序文件夹里。
@@ -78,7 +81,7 @@ def build():
                     '/reference:System.Windows.Forms.dll', '/out:' + str(stage / 'Harness Launcher.exe'),
                     str(ROOT / 'packaging/Launcher.cs')], check=True)
     subprocess.run([str(runtime / 'python.exe'), '-B', '-c',
-        "import launcher,maintenance,cache_gc,ssl; assert launcher.VERSION == '0.4.0'; print('Portable runtime imports OK')"],
+        "import launcher,maintenance,cache_gc,runtime_repair,ssl; assert launcher.VERSION == '0.4.1'; print('Portable runtime imports OK')"],
         cwd=stage, check=True)
     (stage / 'BUILD.json').write_text(json.dumps({'version': VERSION, 'python': PYTHON,
         'pythonDownloadSHA256': RUNTIME_SHA, 'sourceCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),

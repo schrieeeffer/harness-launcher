@@ -17,6 +17,15 @@ from launcher import (Manager, MenuError, OFFICIAL, Server, Handler, UNINSTALL_K
                       default_executable, registry_executable, file_hash)
 
 
+def make_runtime(exe):
+    from runtime_repair import ANCHORS
+    for name in ANCHORS:
+        path = exe.parent / 'resources/runtime' / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b'official runtime fixture')
+
+
 class ManagerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -39,6 +48,7 @@ class ManagerTests(unittest.TestCase):
         (nonplugin / 'package.json').write_text('{"name":"utility"}')
         self.exe = root / 'DeepSeek Harness.exe'
         self.exe.write_bytes(b'not a real executable')
+        make_runtime(self.exe)
         self.manager = Manager(root / 'data', self.home, self.exe)
         # Synthetic, already verified bundle-only records; unknown real plugins
         # now block every file-combination switch, not only native mode.
