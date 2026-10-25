@@ -37,7 +37,7 @@ from verification_cache import VerifiedContentCache
 from runtime_repair import RuntimeRepair
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -199,6 +199,7 @@ class Manager:
         self._track_cache = None
         self._maintenance_cache = None
         self._runtime_repair_cache = None
+        self._official_host_cache = None
         # Establish the root schema before any tracking object can be created.
         # A first install must remain reopenable even if settings were never edited.
         if not self.settings_file.exists():
@@ -229,6 +230,14 @@ class Manager:
                     self._runtime_repair_cache[1].discard()
                 self._runtime_repair_cache = (identity, RuntimeRepair(self))
             return self._runtime_repair_cache[1]
+
+    @property
+    def official_host(self):
+        from official_host import OfficialHost
+        identity = (str(self.home), self.settings['executable'])
+        if self._official_host_cache is None or self._official_host_cache[0] != identity:
+            self._official_host_cache = (identity, OfficialHost(self))
+        return self._official_host_cache[1]
 
     @property
     def home(self):
@@ -332,7 +341,7 @@ class Manager:
         return records
 
     def state(self):
-        with self.lock:
+        with self.lock, self.verification_cache.session():
             raw, obj, bundles = self.manifest()
             plugins = self.discover(obj, bundles)
             marker = PURGE.installed_marker(self.home)
@@ -348,6 +357,10 @@ class Manager:
             for plugin in plugins:
                 plugin['tracking'] = ('builtin' if is_adapter(plugin['id']) else 'auto' if plugin['id'] in tracked else 'untracked')
             exists = Path(self.settings["executable"]).is_file()
+            host_health = self.official_host.status() if exists else {'status': 'blocked', 'message': '找不到 Harness 程序。'}
+            if host_health['status'] in ('changed', 'blocked'):
+                patch_mode['verifiedNative'] = False
+                patch_mode['error'] = host_health['message']
             detected = None if exists else detect_executable()
             return {"version": VERSION, "plugins": plugins, "enabled": [x for x in bundles if x not in OFFICIAL],
                     "official": list(OFFICIAL), "revision": digest(raw),
@@ -355,6 +368,7 @@ class Manager:
                     "profile": str(self.profile), "executable": self.settings["executable"],
                     "executableExists": exists,
                     "runtimeHealth": self.runtime_repair.status(),
+                    "hostHealth": host_health,
                     "detectedExecutable": str(detected) if detected else None,
                     "schemes": self.settings["schemes"], "lastSelection": self.settings["lastSelection"],
                     "schemeLocks": self.settings.get("schemeLocks", {}),
@@ -450,6 +464,9 @@ class Manager:
             try:
                 self.tracking.check_host_identity(selection)
             except PatchError as exc:
+                if (exc.code == 'host_identity_changed' and launch and not selection and scheme is None
+                        and self.official_host.read() is not None):
+                    return self.official_host.launch(self.spawn_harness)
                 raise MenuError(str(exc), code=exc.code, details=exc.details,
                                 recovery=exc.recovery, retryable=exc.retryable) from exc
             if scheme is not None:
@@ -494,11 +511,7 @@ class Manager:
                     # launch a new host with a combination sealed for the old one.
                     self.tracking.check_launch_packages(selection, payload)
                     self.tracking.check_host_identity(selection)
-                    env = os.environ.copy()
-                    env["DSH_HOME"] = str(self.home)
-                    subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env,
-                                     creationflags=CREATE_NO_WINDOW,
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.spawn_harness()
             except PatchError as exc:
                 raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
             except OSError as exc:
@@ -532,6 +545,14 @@ class Manager:
                 result['message'] += ' · ' + warning['message'] + warning['recovery']
                 logging.warning('Preferences could not be saved after a completed operation', exc_info=True)
             return result
+
+    def spawn_harness(self):
+        exe = Path(self.settings['executable'])
+        env = os.environ.copy()
+        env['DSH_HOME'] = str(self.home)
+        subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env,
+                         creationflags=CREATE_NO_WINDOW,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def restore(self, backup_id, revision, native=False):
         with self.lock:
@@ -924,6 +945,14 @@ class Handler(BaseHTTPRequestHandler):
                         result = service.discard()
                 else:
                     raise MenuError('未知运行时修复操作。')
+            elif path.startswith('/api/official-host/'):
+                action = path.rsplit('/', 1)[-1]
+                if action == 'prepare':
+                    result = manager.official_host.prepare(body.get('installer'), body.get('sha512'))
+                elif action == 'accept':
+                    result = manager.official_host.accept(body.get('token'))
+                else:
+                    raise MenuError('未知官方更新验证操作。')
             elif path.startswith('/api/maintenance/'):
                 action = path.rsplit('/', 1)[-1]
                 service = manager.maintenance

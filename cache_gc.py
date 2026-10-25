@@ -24,6 +24,9 @@ class CacheGC:
         tracker.verify_idle()
         stores = {'tracking': tracker.store, 'adapter': tracker.core.store}
         roots = [manager.settings, tracker.load(), tracker.core.load(), manager.maintenance.load()]
+        approval = tracker.root / 'official-host.json'
+        if approval.exists():
+            roots.append(json.loads(tracker.store._path('official-host.json').read_bytes()))
         # Backups and every saved recovery point can refer to old combinations.
         for folder in (manager.data / 'backups', manager.maintenance.folder / 'history'):
             for path in folder.glob('*.json'):

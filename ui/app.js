@@ -31,6 +31,9 @@ function renderConnection() {
   const health = model.server?.runtimeHealth;
   $('runtimeWarning').hidden = !health || health.status === 'ready';
   $('runtimeWarningText').textContent = health?.message || '';
+  const host = model.server?.hostHealth;
+  $('hostWarning').hidden = !host || host.status === 'ready';
+  $('hostWarningText').textContent = host?.message || '';
   const messages = {
     checking: ['正在连接启动器', '正在读取实际配置，请稍候。'],
     offline: ['无法连接启动器后台', '请先点击「重新连接」。如果仍无法连接，请重新双击桌面快捷方式或项目里的 launch.vbs，并使用新打开的菜单。本页勾选会暂时保留；连接恢复后会重新读取实际配置。'],
@@ -120,6 +123,10 @@ function updateSummary() {
   const unknown = patch.unknown?.filter(name => name !== model.server?.tracking?.session?.plugin) || [];
   $('patchTitle').textContent = patch.error ? '补丁切换需要处理' : patch.verifiedNative && !model.draft.ids.length ? '已切换原生模式 · 启动前再次核验' : !model.draft.ids.length ? '将还原补丁并切换官方文件' : '补丁与插件开关自动同步';
   $('patchDescription').textContent = patch.error || (unknown.length ? '以下插件缺少安装前记录，已暂停组合切换：' + unknown.join('、') + '。需先恢复干净的安装，再通过启动器自动记录。' : !model.draft.ids.length ? '按逆序还原已记录文件，再切换官方归档；重新启用时按安装顺序恢复。' : '内置适配与自动记录统一切换；版本变化、记录外改动、共享文件冲突时停止覆盖。');
+  if (model.server.hostHealth?.status === 'native_ready') {
+    $('patchTitle').textContent = model.draft.ids.length ? '旧版插件暂不能用于当前宿主' : '新版原生基线已验证 · 启动前复核';
+    $('patchDescription').textContent = '只允许已验证的新版原生启动；旧插件层与回滚数据保留，不跨版本回放。';
+  }
   const missing = !model.server.executableExists;
   $('exeWarning').hidden = !missing; $('useDetected').hidden = !model.server.detectedExecutable;
   $('exeWarningText').textContent = '当前设置的路径不存在：' + model.server.executable + (model.server.detectedExecutable ? '。已在系统中检测到 ' + model.server.detectedExecutable + '，确认无误后可直接使用。' : '。请在设置中选择 DeepSeek Harness.exe。') + ' 修正前不能启动、切换补丁或开始安装记录。';
@@ -411,7 +418,7 @@ $('boardRetry').onclick = loadBoard;
 $('pluginDetailDialog').addEventListener('close', () => {if ($('pluginDetailDialog').open) return; detailRequest++; detailAbort?.abort();});
 $('detailAdd').onclick = () => {if (!currentDetail || $('detailAdd').disabled) return; const chosen = currentDetail; openAdd(chosen.name, chosen.source, model.server?.plugins.find(p => p.id === chosen.name)?.tracking === 'auto'); toast('已填入插件和来源。检查后点击「安装并打开 Harness」，还原记录会自动保存。');};
 async function openSettings() {let paths = model.server; if (!paths) {try {paths = await api('settings');} catch (_) {paths = {};}} $('exePath').value = paths?.executable || ''; $('homePath').value = paths?.home || ''; $('settingsError').hidden = true; $('settingsDialog').showModal(); }
-$('settingsButton').onclick = openSettings; $('exeSettings').onclick = openSettings; $('runtimeSettings').onclick = openSettings;
+$('settingsButton').onclick = openSettings; $('exeSettings').onclick = openSettings; $('runtimeSettings').onclick = openSettings; $('hostSettings').onclick = openSettings;
 $('detectExe').onclick = async () => {try {const found = (await api('settings')).detected; if (found) {$('exePath').value = found; toast('已检测到 Harness：' + found + '。确认后点击「保存路径设置」。');} else toast('没有在安装登记和常见目录中找到 Harness，请手动填写 DeepSeek Harness.exe 的完整路径。', true);} catch (error) {toast(error.message, true);}};
 $('useDetected').onclick = () => act(async () => {const result = await api('settings', {executable: model.server.detectedExecutable, home: model.server.home}); await refresh(true); toast(result.message);});
 $('settingsForm').onsubmit = async event => {event.preventDefault(); await act(async () => { try {const result = await api('settings', {executable: $('exePath').value.trim(), home: $('homePath').value.trim()}); await refresh(true); toast(result.message); $('settingsDialog').close();} catch (e) {$('settingsError').textContent = e.message; $('settingsError').hidden = false;} });};
@@ -564,10 +571,11 @@ $('previewCleanup').onclick = () => act(async () => {
 });
 store.subscribe((value, event) => { if ($('maintenanceDialog').open && ['operation/start', 'operation/observed', 'operation/end', 'state/received'].includes(event.type)) renderMaintenance(); });
 
-let runtimeRepairPlan = null;
+let runtimeRepairPlan = null, hostApprovalPlan = null;
 function renderRuntimeRepair() {
   const busy = model.operation.busy;
-  for (const id of ['runtimeCheck', 'runtimePrepare', 'runtimeDiscard', 'runtimeInstaller', 'runtimeChecksum']) $(id).disabled = busy;
+  for (const id of ['runtimeCheck', 'runtimePrepare', 'runtimeDiscard', 'runtimeInstaller', 'runtimeChecksum', 'hostPrepare', 'hostAccept']) $(id).disabled = busy;
+  $('hostAccept').hidden = !hostApprovalPlan;
   $('runtimeExecute').hidden = !runtimeRepairPlan;
   $('runtimeDiscard').hidden = !runtimeRepairPlan;
   $('runtimeExecute').disabled = busy || !runtimeRepairPlan?.missing?.length || Boolean(runtimeRepairPlan?.blocked?.length);
@@ -577,6 +585,25 @@ function renderRuntimeRepair() {
 }
 $('runtimeCheck').onclick = () => act(async () => {
   const result = await api('runtime/status'); $('runtimeRepairStatus').textContent = result.message;
+});
+$('hostPrepare').onclick = () => act(async () => {
+  hostApprovalPlan = null; renderRuntimeRepair();
+  $('hostApprovalStatus').textContent = '正在验证官方签名、安装文件和原生配置；不会修改安装目录。';
+  try {
+    hostApprovalPlan = await api('official-host/prepare', {installer: $('runtimeInstaller').value.trim() || undefined, sha512: $('runtimeChecksum').value.trim() || undefined}, 0);
+    $('hostApprovalStatus').textContent = hostApprovalPlan.message + (hostApprovalPlan.cleanupPending ? ' 本次暂存内容清理未完成，已保留。' : '');
+  } catch (error) { $('hostApprovalStatus').textContent = error.message; throw error; }
+  finally { renderRuntimeRepair(); }
+});
+$('hostAccept').onclick = () => act(async () => {
+  if (!hostApprovalPlan) return;
+  const token = hostApprovalPlan.token;
+  hostApprovalPlan = null; renderRuntimeRepair();
+  try {
+    const result = await api('official-host/accept', {token}, 0);
+    $('hostApprovalStatus').textContent = result.message;
+    await refresh();
+  } catch (error) { $('hostApprovalStatus').textContent = error.message + ' 请刷新状态；不要盲目重复提交。'; throw error; }
 });
 $('runtimePrepare').onclick = () => act(async () => {
   runtimeRepairPlan = null; renderRuntimeRepair(); $('runtimeRepairFiles').hidden = true;

@@ -1,7 +1,7 @@
 # Architecture and data contract / 架构与数据契约
 
-This describes the 0.4.1 implementation. Runtime control data uses format 3.
-本文说明 0.4.1 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.0.md)。
+This describes the 0.4.2 implementation. Runtime control data uses format 3.
+本文说明 0.4.2 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.0.md)。
 
 ## Architecture diagram / 架构图
 
@@ -27,6 +27,11 @@ flowchart TB
     PORT["Windows 便携入口\n自带 Python，不含 Harness 或用户数据"] --> UI
     API --> HOST["宿主内容边界检查\n程序 / 活动归档变化时提前拒绝"]
     HOST --> SP["SwitchPlan\n验证当前组合 / 规划并执行切换"]
+    HOST --> OH["OfficialHost\n宿主变化 → 官方包签名与 SHA-512 → 文件比对"]
+    OH --> NB["显式保存独立原生启动基线\n保留旧补丁与回滚对象，不跨版本回放"]
+    NB --> CS
+    NB --> NV["每次复核宿主、配置及官方文件\n仅原生配置允许启动"]
+    NV --> RUN
     API --> PT["PluginTracking\n安装前后记录与版本约束"]
     PT --> PIN["安装会话：固定官方归档与其他插件依赖\n混合更新暂停；会话声明更新保护能力"]
     PT --> VS["VersionStore\n插件依赖、版本、组合与原生基线"]
@@ -77,6 +82,12 @@ flowchart TD
     IDLE -->|否| WAIT["保留检查点；先验证或恢复"]
     IDLE -->|是| HOST{"宿主程序与归档仍匹配记录？"}
     HOST -->|否| STOP["提示宿主变化，保留记录\n不创建备份、不扫描大目录、不覆盖新版本"]
+    STOP --> NATIVE{"已还原原生、无活动插件及未完成事务？"}
+    NATIVE -->|否| KEEP
+    NATIVE -->|是| PKVERIFY["显式校验同版本官方包签名、SHA-512\n比对官方启动文件与旧原生用户侧文件"]
+    PKVERIFY --> ACCEPT["预览 → 复核 → 原子保存独立基线引用\n旧补丁、安装目录和配置不变"]
+    ACCEPT --> NVERIFY["日常启动复核基线、文件、配置与运行状态\n旧插件选择仍拒绝"]
+    NVERIFY --> M
     HOST -->|是| B{"请求启动且组合与配置未变化？"}
     B -->|是| C["重新验证在用文件、包与宿主\n不扫描未使用的暂存树"]
     B -->|否| D{"仅改变空文件差异插件的加载项？"}
@@ -142,6 +153,7 @@ own regression validation.
 | Observability / 操作状态 | `operations.py`, `errors.py` | 有界操作记录、稳定错误代码、恢复建议 |
 | Browser / 前端 | `ui/api.js`, `ui/state.js`, `ui/runtime.js`, `ui/app.js` | 请求传输、不可变状态与 reducer、异步调度、DOM 呈现与事件 |
 | Maintenance / 插件维护 | `maintenance.py`, `maintenance_files.py`, `update_check.py`, `cache_gc.py` | 来源检查、检查点、首次运行验证、预览恢复与无引用回收；不进入日常扫描路径 |
+| Official host recovery / 官方宿主恢复 | `runtime_repair.py`, `official_host.py` | 同版本签名包补缺失；建立独立原生启动基线。两条显式流程都保留旧插件和用户数据 |
 | Distribution / 分发 | `packaging/Launcher.cs`, `packaging/build_portable.py` | 白名单打包、官方运行时哈希验证、无命令启动入口 |
 
 `ContentStore` does not know about plugins or `Manager`. `VersionStore` receives

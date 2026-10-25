@@ -38,7 +38,9 @@ class AdapterHostUpdateTests(unittest.TestCase):
         self.exe.write_bytes(b'new official executable')
         with patch.object(self.manager.tracking.versions, 'hash', wraps=self.manager.tracking.versions.hash) as hashes:
             error = self.assert_rejected_without_work([])
-        hashes.assert_called_once_with(self.exe)
+        # Both the UI preflight and the launch gate reject the EXE before ASAR.
+        self.assertTrue(hashes.call_count)
+        self.assertTrue(all(call.args == (self.exe,) for call in hashes.call_args_list))
         self.assertEqual(error.details['components'], ['executable'])
 
     def test_asar_only_update_with_same_size_and_mtime_invalidates_anchor(self):

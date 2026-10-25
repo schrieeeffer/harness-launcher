@@ -2,16 +2,16 @@
 
 <img src="docs/images/logo.svg" width="64" alt="Harness Launcher">
 
-为 DeepSeek Harness 提供本机插件组合、启动和维护界面。当前版本 **0.4.1**，Windows x64 开发预览版，与 DeepSeek 官方没有隶属关系。
+为 DeepSeek Harness 提供本机插件组合、启动和维护界面。当前版本 **0.4.2**，Windows x64 开发预览版，与 DeepSeek 官方没有隶属关系。
 
-[English](README.en.md) · [下载](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.1) · [功能截图](docs/feature-tour-0.4.0.md) · [运行时修复](docs/runtime-repair.md) · [维护指南](docs/plugin-maintenance.md) · [验证记录](docs/validation-0.4.0.md)
+[English](README.en.md) · [下载](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.2) · [功能截图](docs/feature-tour-0.4.0.md) · [运行时修复](docs/runtime-repair.md) · [维护指南](docs/plugin-maintenance.md) · [验证记录](docs/validation-0.4.0.md)
 
 ![主界面](docs/images/feature-tour-0.4.0/01-overview.png)
 
 ## 下载与启动
 
 1. 安装并打开一次官方 DeepSeek Harness 桌面版。
-2. 从 Release 下载 `Harness-Launcher-0.4.1-Windows-x64.zip`，完整解压。
+2. 从 Release 下载 `Harness-Launcher-0.4.2-Windows-x64.zip`，完整解压。
 3. 双击 `Harness Launcher.exe`。便携包自带 Python，无需安装开发环境。
 4. 若未找到 Harness，在“设置与说明”中自动检测或填写程序路径。
 
@@ -33,6 +33,7 @@
 | 配置备份 | 改配置前自动备份；恢复前再次备份。配置备份有版本约束，不等同于整个系统或插件代码备份。 |
 | 设置与说明 | 配置程序和数据路径、查看更新边界、退出启动器后台。运行中的 Harness 通常需要先退出，才能切换文件。 |
 | 官方运行时修复 | 在设置中完整检查同版本官方安装包，预览并补齐缺失文件。验证签名、SHA-512 和宿主一致性；已有内容冲突时停止。需要安装 7-Zip。[操作说明与截图](docs/runtime-repair.md)。 |
+| 官方更新后原生启动 | 更新后因旧基线被拦截时，在设置中验证官方包并保存独立原生基线。只恢复已验证的原生启动，旧插件继续受版本限制。[操作与边界](docs/official-update-native.md)。 |
 
 ## 更新、卸载与恢复
 

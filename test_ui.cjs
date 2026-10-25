@@ -500,3 +500,39 @@ test('runtime repair requires preview token and clears preview after successful 
   assert.deepEqual(JSON.parse(calls[0].body), {token:'p2'});
   assert.equal(ui.nodes.get('runtimeExecute').hidden, true);
 });
+
+test('changed official host warns and blocks launch before a request is sent', async () => {
+  const ui = await app();
+  ui.state.hostHealth = {status:'changed', message:'official update needs verification'};
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('hostWarning').hidden, false);
+  assert.equal(ui.nodes.get('launch').disabled, true);
+  assert.equal(ui.nodes.get('apply').disabled, true);
+  await ui.nodes.get('hostSettings').onclick();
+  assert.equal(ui.nodes.get('settingsDialog').open, true);
+});
+
+test('new official approval enables only native launch, never old plugins or recording', async () => {
+  const ui = await app();
+  ui.state.enabled = [];
+  ui.state.hostHealth = {status:'native_ready', message:'native approved'};
+  await ui.run('refresh(true)');
+  ui.nodes.get('selectNone').onclick();
+  assert.equal(ui.nodes.get('launch').disabled, false);
+  assert.equal(ui.nodes.get('trackingBegin').disabled, true);
+  ui.nodes.get('selectAll').onclick();
+  assert.equal(ui.nodes.get('launch').disabled, true);
+  assert.equal(ui.nodes.get('apply').disabled, true);
+});
+
+test('official host verification only previews until explicit accept with token', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = (path, options) => path === 'official-host/prepare' ? response({token:'host1', message:'official verified'})
+    : path === 'official-host/accept' ? response({message:'native baseline saved'}) : online(path, options);
+  await ui.nodes.get('hostPrepare').onclick();
+  assert.equal(ui.nodes.get('hostAccept').hidden, false);
+  assert.equal(ui.calls.filter(c=>c.url.includes('official-host/accept')).length, 0);
+  await ui.nodes.get('hostAccept').onclick();
+  assert.deepEqual(JSON.parse(ui.calls.find(c=>c.url.includes('official-host/accept')).body), {token:'host1'});
+  assert.equal(ui.nodes.get('hostAccept').hidden, true);
+});

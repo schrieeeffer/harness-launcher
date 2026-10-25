@@ -172,7 +172,7 @@ class SevenZip:
     def listing(self, path):
         return archive_entries(self.run('l', '-slt', '-sccUTF-8', path))
 
-    def extract(self, installer, stage):
+    def unpack(self, installer, stage):
         outer = self.listing(installer)
         if not any(e['path'] == '$PLUGINSDIR/app-64.7z' and not e['folder'] for e in outer):
             fail('安装包不是支持的 Windows x64 官方包。')
@@ -180,6 +180,27 @@ class SevenZip:
         payload = stage / 'app-64.7z'
         regular(payload)
         entries = self.listing(payload)
+        return payload, entries
+
+    def extract_host(self, installer, stage):
+        """Read official desktop files, CLI and launch anchors without copying all Python packages."""
+        payload, entries = self.unpack(installer, stage)
+        anchors = {'resources/runtime/' + name for name in ANCHORS}
+        expected = {e['path']: e['size'] for e in entries if not e['folder'] and
+                    (not e['path'].startswith('resources/runtime/') or
+                     e['path'].startswith('resources/runtime/cli/') or e['path'] in anchors)}
+        if not (anchors | {'DeepSeek Harness.exe', 'resources/app.asar'}) <= expected.keys():
+            fail('官方包缺少宿主或运行时启动文件，不能建立新版原生基线。')
+        if shutil.disk_usage(stage).free < sum(expected.values()) + 64 * 1024 ** 2:
+            fail('暂存磁盘空间不足，不能验证新版官方安装。')
+        listing = stage / 'members.txt'
+        listing.write_text('\n'.join(expected) + '\n', encoding='utf-8')
+        self.run('x', '-y', '-spd', '-sccUTF-8', '-scsUTF-8', payload,
+                 '@' + str(listing), '-o' + str(stage / 'payload'))
+        return stage / 'payload', expected
+
+    def extract(self, installer, stage):
+        payload, entries = self.unpack(installer, stage)
         expected = {e['path'].removeprefix('resources/runtime/'): e['size'] for e in entries
                     if e['path'].startswith('resources/runtime/') and not e['folder']}
         if not all(name in expected for name in ANCHORS):

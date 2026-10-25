@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.4.1 — verified official runtime recovery
+## 0.4.2 — verified native launch after official updates
+
+- Detect stale host baselines in the home screen before launch. Do not label an old native snapshot as verified for an updated host.
+- Add an explicit signed-installer preview and independent native-launch baseline. Compare official desktop files, CLI and runtime anchors; preserve old native user-side files and all patch/rollback records. Launch only the already-native manifest, without replaying old layers.
+- Pin approval to host bytes and control files, recheck before acceptance and each launch, and retain the content-addressed approval during cache collection. Old plugin activation, switching and recording stay blocked across host versions; this is not cross-version plugin migration.
 
 - Add inexpensive mandatory-file checks before launching or recording installations and a Settings repair entry independent of plugin host-version guards. Keep verified apply-only restoration available.
 - Verify a private official installer copy with SHA-512 and Windows Authenticode, enforce the DeepSeek publisher, and match installed executable / app.asar hashes against the extracted package.
