@@ -173,7 +173,14 @@ class SwitchPlan:
         if config_plan is not None:
             if native:
                 self.core.verify_native_config([p for p in plugins if p['id'] not in old['records']])
+            # This plan changes only the manifest. execute() independently
+            # verifies both combinations before writing it; another package
+            # pass here would repeat the same work without protecting a write.
             return config_plan
+        report_progress('packages', '校验插件版本与依赖文件')
+        # Full layer planning needs package identity as well as the forward and
+        # reverse patch blobs. Package installation is unchanged by switching.
+        self.tracker.check_versions(plugins, selection, recovery=False)
         preserve_native = bool(previous_core and previous_core['mode'] == 'native'
                                and self.core.adapter.plugin not in selection)
         view = self.file_view(self.roots(include_dormant=not preserve_native), self.hashes)

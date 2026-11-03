@@ -252,6 +252,34 @@ class NativeSwitchTests(unittest.TestCase):
         replay.assert_not_called()
         self.assertEqual(self.manifest.read_bytes(), raw)
 
+    def test_bundle_plan_defers_package_reads_but_rejects_late_code_changes(self):
+        self.apply([])
+        self.begin('plugin-a')
+        self.install_fixture('plugin-a')
+        code = self.profile / 'node_modules/plugin-a/index.js'
+        code.write_bytes(b'export default 1;')
+        self.accept()
+        self.apply(['plugin-a'])
+        tracker = self.manager.tracking
+        original = code.read_bytes()
+        for selection in ([], ['plugin-a']):
+            with self.subTest(selection=selection):
+                if selection:
+                    self.apply([])
+                with patch.object(tracker.versions, 'capture', side_effect=AssertionError('duplicate preflight package pass')):
+                    plan = self.prepare(selection)
+                self.assertTrue(plan['configurationOnly'])
+                manifest = self.manifest.read_bytes()
+                stamp = code.stat()
+                code.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                os.utime(code, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                planner = SwitchPlan(tracker)
+                with patch.object(planner, 'replay') as replay, self.assertRaises(PatchError):
+                    planner.execute(plan)
+                replay.assert_not_called()
+                self.assertEqual(self.manifest.read_bytes(), manifest)
+                code.write_bytes(original)
+
     def test_suspended_unselected_package_does_not_block_bundle_switch(self):
         self.record_bundle_only()
         paused = self.profile / 'node_modules/plugin-b'
