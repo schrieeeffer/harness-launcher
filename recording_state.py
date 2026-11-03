@@ -262,6 +262,18 @@ def validate_registry(value):
             or len(features) != len(set(features))):
         raise DomainError('登记表需要当前程序不支持的功能。')
     records, order = value.get('records'), value.get('order')
+    suspended = value.get('suspended', {})
+    if not isinstance(suspended, dict):
+        raise DomainError('暂停插件记录无效。')
+    for name, reason in suspended.items():
+        _name(name)
+        if not isinstance(reason, str) or not reason:
+            raise DomainError('暂停插件必须提供原因。')
+    suspended_packages = value.get('suspendedPackages', {})
+    if not isinstance(suspended_packages, dict) or not set(suspended_packages) <= set(suspended):
+        raise DomainError('暂停插件包引用无效。')
+    for reference in suspended_packages.values():
+        object_reference(reference, 'packages')
     if not isinstance(records, dict) or not isinstance(order, list):
         raise DomainError('插件登记表结构无效。')
     names = _names(order)

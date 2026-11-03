@@ -96,6 +96,26 @@ class ContentStoreTests(unittest.TestCase):
             self.assertEqual(blob.read_bytes(), b'corrupt')
         self.assertEqual(list((self.store.root / 'blobs').glob('*.tmp')), [])
 
+    def test_uncached_duplicate_checkpoint_reads_but_never_writes_a_temp_file(self):
+        stamp = self.stamp()
+        key = self.store.store_file(self.source, stamp)
+        with patch('storage.hash_file', wraps=hash_file) as read, patch('storage.os.fsync') as sync, \
+                patch('storage.os.replace') as replace:
+            self.assertEqual(self.store.store_file(self.source, stamp), key)
+        read.assert_called_once_with(self.source)
+        sync.assert_not_called()
+        replace.assert_not_called()
+        self.assertEqual(list((self.store.root / 'blobs').glob('*.tmp')), [])
+
+    def test_content_change_between_hash_and_copy_does_not_publish_wrong_identity(self):
+        original = hash_file(self.source)
+        def wrong_hash(_):
+            return '0' * 64
+        with patch('storage.hash_file', side_effect=wrong_hash), self.assertRaises(StorageError):
+            self.store.store_file(self.source, self.stamp())
+        self.assertFalse((self.store.root / 'blobs' / original).exists())
+        self.assertEqual(list((self.store.root / 'blobs').glob('*.tmp')), [])
+
     def test_source_change_during_write_does_not_publish_blob(self):
         stamp = self.stamp()
         fsync = os.fsync
@@ -192,6 +212,36 @@ class ContentStoreTests(unittest.TestCase):
         with patch('storage.os.replace', side_effect=OSError('simulated disk failure')):
             with self.assertRaises(OSError):
                 atomic_write(self.source, b'new')
+        self.assertEqual(self.source.read_bytes(), b'original data')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file-sharing semantics')
+    def test_atomic_write_retries_transient_windows_reader_without_rewriting_temp(self):
+        blocked = PermissionError('reader briefly holds destination')
+        blocked.winerror = 32
+        replace = os.replace
+        calls = []
+        def race(source, destination):
+            calls.append(source)
+            if len(calls) < 3:
+                self.assertEqual(self.source.read_bytes(), b'original data')
+                raise blocked
+            replace(source, destination)
+        with patch('storage.os.replace', side_effect=race), patch('storage.time.sleep'):
+            atomic_write(self.source, b'complete new record')
+        self.assertEqual(len(set(calls)), 1)
+        self.assertEqual(self.source.read_bytes(), b'complete new record')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file-sharing semantics')
+    def test_atomic_write_permanent_access_denial_is_bounded_and_preserves_original(self):
+        blocked = PermissionError('permanent access denial')
+        blocked.winerror = 5
+        with patch('storage.os.replace', side_effect=blocked) as replace, patch('storage.time.sleep') as wait:
+            with self.assertRaises(PermissionError):
+                atomic_write(self.source, b'cannot publish')
+        self.assertEqual(replace.call_count, 8)
+        self.assertEqual(wait.call_count, 7)
         self.assertEqual(self.source.read_bytes(), b'original data')
         self.assertEqual(list(self.root.glob('*.tmp')), [])
 

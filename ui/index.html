@@ -179,7 +179,7 @@
 
           <section id="patchNote" class="notice" hidden>
             <svg class="icon notice-icon" aria-hidden="true"><use href="#i-info"/></svg>
-            <div><strong id="patchTitle">自动管理补丁</strong><p id="patchDescription">关闭时还原官方文件，启用时恢复已校验的补丁快照。</p></div>
+            <div><strong id="patchTitle">自动管理补丁</strong><p id="patchDescription">关闭时还原官方文件，启用时恢复已校验的补丁快照。</p><p>组合建议：dsh-purge 等修改宿主代码或全局提示词的插件建议单独启用，保留官方基础组件。这样可减少插件间冲突，但仍需验证与当前官方版本的兼容性。</p></div>
           </section>
 
           <div class="path-line">
@@ -212,10 +212,18 @@
   </dialog>
 
   <dialog id="maintenanceDialog" class="wide-dialog">
-    <div class="dialog-head"><div><h2>更新与卸载</h2><p class="dialog-desc">检查新版、预览改动、保留恢复点。</p><p id="maintenanceProgress" class="small muted" role="status" hidden></p></div><button class="close" data-close="maintenanceDialog" aria-label="关闭">×</button></div>
+    <div class="dialog-head"><div class="maintenance-heading"><h2>更新与卸载</h2><p class="dialog-desc">先查看操作说明，确认后才更新、卸载或清理。</p>
+      <section id="maintenanceProgress" class="launch-progress maintenance-progress" aria-label="插件维护进度" hidden>
+        <div class="progress-heading"><strong id="maintenanceLabel">准备操作</strong><span id="maintenanceElapsed">0 秒</span></div>
+        <div id="maintenanceTrack" class="progress-track" role="progressbar" aria-label="维护阶段进度" aria-valuemin="0" aria-valuemax="5"><div id="maintenanceFill" class="progress-fill"></div><span id="maintenanceThumb" class="progress-thumb" aria-hidden="true"></span></div>
+        <div class="progress-caption"><span id="maintenanceDetail">等待后台报告进度</span><span id="maintenanceStep">阶段进度</span></div>
+        <p id="maintenanceHint" class="progress-hint" hidden>正在处理。文件总量或下载进度未知时显示活动条，不估算剩余时间。</p>
+      </section>
+    </div><button class="close" data-close="maintenanceDialog" aria-label="关闭">×</button></div>
     <div class="dialog-body">
       <p class="small muted">更新检查不会影响启动速度。升级和卸载前请退出 Harness；首次完整检查及下载可能超过 30 秒。</p>
-      <div class="help-tools"><button id="checkUpdates" class="button primary">检查插件更新</button><button id="previewCleanup" class="button">预览缓存清理</button><button id="refreshMaintenance" class="button">刷新维护状态</button></div>
+      <div class="help-tools"><button id="checkUpdates" class="button primary">检查插件更新</button><button id="previewCleanup" class="button">清理缓存…</button><button id="refreshMaintenance" class="button">刷新维护状态</button></div>
+      <p class="small muted">带“…”的按钮会先打开确认页，查看说明或取消都不会执行操作。</p>
       <p id="maintenanceStatus" role="status" class="small muted"></p>
       <div id="maintenancePending" class="settings-section" hidden></div>
       <div id="maintenanceList"></div>
@@ -223,9 +231,9 @@
     </div>
   </dialog>
   <dialog id="maintenancePreview" class="wide-dialog">
-    <div class="dialog-head"><h2 id="maintenancePreviewTitle">操作预览</h2><button class="close" data-close="maintenancePreview" aria-label="关闭">×</button></div>
-    <div class="dialog-body"><p id="maintenancePreviewText"></p><ul id="maintenancePreserved" class="help-list"></ul><p id="maintenanceBlocked" class="inline-error" hidden></p><pre id="maintenanceFiles" class="maintenance-files"></pre></div>
-    <div class="dialog-actions"><button class="button" data-close="maintenancePreview">取消</button><button id="maintenanceConfirm" class="button primary">确认执行</button></div>
+    <div class="dialog-head"><h2 id="maintenancePreviewTitle">确认操作</h2><button class="close" data-close="maintenancePreview" aria-label="关闭">×</button></div>
+    <div class="dialog-body"><p id="maintenancePreviewNotice" class="import-summary" role="status"></p><p id="maintenancePreviewText"></p><ul id="maintenancePreserved" class="help-list"></ul><p id="maintenanceBlocked" class="inline-error" hidden></p><details id="maintenanceFileDetails"><summary id="maintenanceFilesLabel">查看详细文件清单</summary><pre id="maintenanceFiles" class="maintenance-files"></pre></details></div>
+    <div class="dialog-actions"><button class="button" data-close="maintenancePreview">取消</button><button id="maintenanceConfirm" class="button primary">确认操作</button></div>
   </dialog>
 
   <dialog id="settingsDialog" class="wide-dialog">
@@ -260,14 +268,22 @@
       <section class="settings-section">
         <h3>Harness 与插件更新</h3>
         <ul class="help-list">
-          <li><strong>官方更新：</strong>先退出 Harness，在启动器中切换到原生模式并启动，再使用官方更新。新版安装完成后，旧插件记录需要重新适配；启动器会保留记录并停止跨版本覆盖。</li>
+          <li><strong>官方更新：</strong>先完全退出 Harness，在下方检查缓存包并预览升级；启动器保存检查点、还原补丁，安装后接续新基线。</li>
           <li><strong>启用插件时更新：</strong>启动器无法拦截 Harness 内的更新或更新器自动重启。若已更新，请保留现场，避免强制还原旧补丁；先确认新版的干净安装，再记录兼容插件。</li>
           <li><strong>插件更新与卸载：</strong>在“更新与卸载”中统一检查版本，先看预览再执行。维护前保存可恢复检查点；升级后需要正常运行并退出，再完成验证。其他插件及共享依赖发生变化时会停止。</li>
-          <li><strong>purge 更新：</strong>使用专用维护流程，先校验并还原旧补丁，安装指定版本后重新应用并验证。新版必须声明适配当前 Harness；跨宿主版本不能沿用旧补丁。</li>
+          <li><strong>宿主补丁更新：</strong>先保存检查点并还原旧补丁，再安装固定版本。目标版本声明不同会进入首次运行验证；必须在当前 Harness 上重新应用并通过校验，不能沿用旧宿主补丁。失败可预览恢复检查点。</li>
         </ul>
         <p class="small muted">检查或下载更新不会自动更换基线。校验失败时保留日志、快照和会话；清空缓存或修改版本号不能解决版本不兼容。</p>
       </section>
 
+      <section class="settings-section">
+        <h3>官方版本更新</h3>
+        <p>复用官方更新器已下载的安装包，或填写下方路径和 SHA-512。启动器不重复下载。先预览，再保存检查点、还原补丁并调用官方安装器。</p>
+        <div class="help-tools"><button id="officialUpdatePrepare" class="button">检查缓存并预览升级</button><button id="officialUpdateExecute" class="button primary" hidden>保存检查点并安装</button></div>
+        <div class="help-tools"><button id="officialUpdateResume" class="button">检查并接续已安装版本</button><button id="officialUpdateAbort" class="button" hidden>宿主未变时恢复原组合</button></div>
+        <p id="officialUpdateStatus" class="small" role="status">在 Harness 内更新后，下次点击启动会自动检查缓存并接续。旧版文件补丁不会跨版本覆盖；无法确认兼容的插件会暂停并说明原因。</p>
+        <p class="small muted">安装包签名结果有时效；包内容或文件身份变化会重新校验。只有缺失文件才会解包恢复，已有冲突文件保留。首次更新验证可能超过 30 秒。</p>
+      </section>
       <section class="settings-section">
         <h3>官方运行时修复</h3>
         <p>更新后提示 SKILL.md、Python 或其他运行时文件缺失时，先完全退出 Harness，再检查。默认读取官方更新缓存，也可指定同版本官方安装包。</p>
@@ -283,7 +299,7 @@
       <section class="settings-section">
         <h3>官方更新后原生启动</h3>
         <p class="small">运行时修复后仍提示“宿主文件已变化”？使用上方安装包验证新版官方文件，再保存独立的原生启动基线。要求更新前已还原原生组合、当前未启用插件且没有未完成操作。</p>
-        <p class="small">不会改写旧补丁、安装文件或用户数据。旧插件仍受版本校验限制，本入口不自动迁移或重新记录旧插件。完整验证只在建立基线时解包；日常启动复用文件校验缓存。</p>
+        <p class="small">不会改写旧补丁、安装文件或用户数据。旧插件仍受版本校验限制，本入口不自动迁移或重新记录旧插件。此手动入口仅允许原生启动。优先使用上方“官方版本更新”完成自动接续与兼容性检查；各入口共享已认证的安装包清单。</p>
         <div class="help-tools"><button id="hostPrepare" class="button">验证新版并预览基线</button><button id="hostAccept" class="button primary" hidden>保存原生启动基线</button></div>
         <p id="hostApprovalStatus" class="small" role="status"></p>
       </section>
@@ -302,6 +318,7 @@
           <li>关闭插件不会卸载插件。安装新插件请使用「手动添加」或从「发现插件」选用，安装前会自动建立快照；各插件能否还原可在「补丁记录」查看。官方基础组件不能关闭，插件启动次序沿用配置中的顺序。</li>
           <li>切换前请完全退出 Harness，包括托盘。菜单会检查运行状态，不会强制关闭会话。</li>
           <li>dsh-purge 支持自动还原：原生模式使用保留的官方归档，并暂存插件注入规则、提示词和红队预设；启用时恢复同版本补丁快照。其他插件可通过通用安装前后快照登记文件差异，无需逐个写适配器；没有安装前记录时仍会阻止宣称完整还原。账号、会话和普通偏好不重置。</li>
+          <li>建议 dsh-purge 等修改宿主代码或全局提示词的插件单独启用，尤其在首次安装、升级和排查问题时；官方基础组件保持开启。这样可减少插件间冲突、便于定位问题，但不能排除插件自身或官方版本兼容性问题。此建议不强制限制组合，也不替代文件校验和回滚。</li>
           <li>应用前自动备份 package.json，保留账号、会话、其他配置和已安装依赖。恢复配置备份也会同步已适配插件的补丁状态，不回退插件版本。切换有日志，失败自动回滚；版本升级或检测到外部文件改动时停止覆盖。</li>
         </ul>
       </section>
@@ -370,14 +387,32 @@
         <div class="manual-hint"><span>不确定包名？可以先在插件目录中搜索。</span><button id="discoverFromTracking" class="button subtle" type="button">去发现插件 →</button></div>
         <fieldset class="source-kinds">
           <legend>安装来源</legend>
-          <label class="source-kind"><input type="radio" name="sourceKind" value="npm" checked><strong>npm 包</strong><span>按包名与版本安装</span></label>
-          <label class="source-kind"><input type="radio" name="sourceKind" value="local"><strong>本地目录</strong><span>开发中或已下载的插件</span></label>
-          <label class="source-kind"><input type="radio" name="sourceKind" value="git"><strong>Git 仓库</strong><span>HTTPS 仓库地址</span></label>
-          <label class="source-kind"><input type="radio" name="sourceKind" value="self"><strong>自行安装</strong><span>快照后在 Harness 内操作</span></label>
+          <label class="source-kind"><input type="radio" name="sourceKind" value="npm" disabled><strong>npm 包</strong><span id="sourceNpmStatus">填写包名后验证发布版本</span></label>
+          <label class="source-kind"><input type="radio" name="sourceKind" value="local" disabled><strong>本地目录</strong><span id="sourceLocalStatus">提供目录并验证构建文件后可选</span></label>
+          <label class="source-kind"><input type="radio" name="sourceKind" value="git" disabled><strong>Git 仓库</strong><span id="sourceGitStatus">验证根目录和构建文件后可选</span></label>
+          <div class="source-kind unavailable"><strong>自行安装</strong><span>不是安装来源；见下方高级手动记录</span></div>
         </fieldset>
         <label class="field">插件包名<input id="trackingName" required maxlength="160" placeholder="例如：dsh-example 或 @作者/插件"></label>
         <label class="field" id="sourceField"><span id="sourceLabel">版本或标签（可选）</span><input id="trackingSource" maxlength="2048"></label>
+        <button id="verifyNpmSource" class="button" type="button">验证 npm 版本</button>
+        <details id="otherSources" class="help">
+          <summary>验证本地目录 / Git 来源</summary>
+          <p class="small muted">仓库链接不代表可以直接安装。源码需先构建；这里只读取声明和文件清单，不下载依赖、不执行构建。</p>
+          <label class="field">已构建的插件目录<input id="localSourcePath" maxlength="2048" placeholder="例如：D:\plugins\dsh-example"></label>
+          <button id="verifyLocalSource" class="button" type="button">验证本地目录</button>
+          <label class="field">GitHub 仓库地址<input id="gitSourceUrl" maxlength="2048" placeholder="https://github.com/作者/仓库.git#版本"></label>
+          <button id="verifyGitSource" class="button" type="button">验证 Git 来源</button>
+          <p id="otherSourceFeedback" class="small muted" role="status"></p>
+        </details>
+        <details id="manualRecording" class="help">
+          <summary>高级：仅记录手动安装</summary>
+          <p class="small muted">不代表此插件支持任意来源。先备份并打开 Harness，再由你按作者说明安装；启动器只记录监控范围内的改动。</p>
+          <label><input id="manualRecordMode" type="checkbox">我将按作者说明手动安装，只建立还原记录</label>
+        </details>
         <p id="sourceHint" class="small muted"></p>
+        <p id="trackingGate" class="small tracking-gate" role="status" hidden></p>
+        <p id="trackingRequestError" class="inline-error" role="alert" hidden></p>
+        <button id="trackingSettings" class="button" type="button" hidden>打开设置检查基线</button>
         <div class="section-actions"><button id="trackingBegin" class="button primary" type="submit">安装并打开 Harness</button></div>
       </form>
 
@@ -439,6 +474,12 @@
         <h3>未记录 <span id="untrackedCount" class="count warn">0</span></h3>
         <p class="small muted">这些插件安装时没有建立快照，无法得知改过哪些文件。组合切换已暂停；需先恢复干净的安装，再通过启动器安装并自动记录，不能把现状冒充原始文件。</p>
         <div id="untrackedRecords" class="record-list"></div>
+      </section>
+
+      <section id="suspendedGroup" class="record-group" hidden>
+        <h3>待重新验证的插件</h3>
+        <p class="small muted">旧记录和恢复材料仍保留。前往“更新与卸载”检查更新，可安装新版或重新验证当前版本；校验通过后解除暂停，不重放旧宿主补丁。</p>
+        <div id="suspendedRecords" class="record-list"></div>
       </section>
 
       <details class="help">

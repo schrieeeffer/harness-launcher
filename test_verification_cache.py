@@ -14,6 +14,54 @@ from verification_cache import NtfsFingerprint, VerifiedContentCache
 
 
 class VerificationCacheTests(unittest.TestCase):
+    def test_alias_close_between_initial_identity_and_lock_is_resampled(self):
+        state = {'calls': 0, 'usn': 8}
+        @contextmanager
+        def alias(path):
+            def stamp():
+                state['calls'] += 1
+                return (1, 2, 3, 4, 5, 3, 6, 7 if state['calls'] == 1 else state['usn'])
+            def close():
+                state['usn'] += 1
+                return state['usn']
+            stamp.close_record = close
+            yield stamp
+        cache = VerifiedContentCache(self.cache_path, alias)
+        self.assertEqual(cache.hash(self.file, hash_file), hash_file(self.file))
+        self.assertEqual(list(cache.entries), ['1:2:3:4:5:3:6:9'])
+
+    def test_parallel_hardlink_aliases_do_not_invalidate_close_barriers(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        import time
+        shared = {'usn': 7, 'reads': 0}
+        guard = threading.Lock()
+        expected = hash_file(self.file)
+        @contextmanager
+        def alias(path):
+            def stamp():
+                return (1, 2, 3, 4, 5, 3, 6, shared['usn'])
+            def content():
+                with guard:
+                    shared['reads'] += 1
+                return expected
+            def close():
+                with guard:
+                    shared['usn'] += 1
+                    barrier = shared['usn']
+                # Make competing aliases overlap, as real NTFS calls can.
+                time.sleep(.03)
+                return barrier
+            stamp.hash_content = content
+            stamp.close_record = close
+            yield stamp
+        cache = VerifiedContentCache(self.cache_path, alias)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            values = list(pool.map(lambda i: cache.hash(self.root/('alias'+str(i)), hash_file), range(32)))
+        self.assertEqual(values, [expected]*32)
+        self.assertEqual(shared['reads'], 1)
+        self.assertEqual(len(cache.entries), 1)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

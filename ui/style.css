@@ -625,6 +625,8 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
 
 .settings-section + .settings-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
 .settings-section h3 { margin-bottom: 14px; }
+#officialUpdateStatus { margin: 12px 0; padding: 12px; border-radius: 8px; background: var(--surface-2); overflow-wrap: anywhere; }
+.tracking-gate { margin-top: 16px; padding: 12px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); }
 .help-list { display: grid; gap: 8px; margin: 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.75; }
 .help-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .settings-section .help-tools { margin-top: 0; }
@@ -922,8 +924,19 @@ dialog::backdrop { background: rgb(15 23 42 / 45%); backdrop-filter: blur(2px); 
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
 /* Lifecycle dialogs reuse the launcher cards, with bounded file previews. */
+.maintenance-heading { flex: 1; min-width: 0; }
+.maintenance-progress { margin-top: 16px; }
 .maintenance-row { padding: 18px 0; border-bottom: 1px solid var(--border, #e1e5ef); }
 .maintenance-row strong { overflow-wrap: anywhere; }
 .maintenance-row .help-tools { margin-top: 10px; }
 .maintenance-files { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f6fa; border-radius: 12px; padding: 16px; font: 13px/1.7 Consolas, monospace; }
  .runtime-repair-files { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.source-kind:has(input:disabled), .source-kind.unavailable { background: #f6f7fa; color: #737c8e; cursor: not-allowed; border-color: #e3e7ef; }
+.source-kind:has(input:disabled) strong { color: #747d8e; }
+.source-kind span { overflow-wrap: anywhere; }
+#sourceHint { overflow-wrap: anywhere; }
+#otherSources .field { margin-top: 14px; }
+#addDialog { width: min(880px, calc(100vw - 32px)); }
+#addDialog .help { margin-top: 18px; padding-top: 14px; }
+#manualRecording { margin-bottom: 14px; }
+.source-kind input:disabled { cursor: not-allowed; }

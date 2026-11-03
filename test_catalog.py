@@ -5,10 +5,54 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from catalog import Catalog, CatalogError, safe_url
+from catalog import Catalog, CatalogError, safe_url, windows_https
 
 
 class CatalogTests(unittest.TestCase):
+    def test_windows_handshake_retry_keeps_certificate_validation(self):
+        import os
+        from types import SimpleNamespace
+        if os.name != 'nt':
+            self.skipTest('Windows Schannel transport')
+        failed = SimpleNamespace(returncode=35, stdout=b'\n000')
+        success = SimpleNamespace(returncode=0, stdout=b'{"name":"demo"}\n200')
+        with patch('subprocess.run', side_effect=[failed, success]) as run:
+            self.assertEqual(windows_https('https://registry.npmjs.org/demo/latest'), {'name': 'demo'})
+            self.assertEqual(run.call_count, 2)
+            retry = run.call_args.args[0]
+            self.assertIn('--tlsv1.2', retry)
+            self.assertIn('--tls-max', retry)
+            self.assertNotIn('--insecure', retry)
+        with patch('subprocess.run', return_value=failed) as run, self.assertRaises(CatalogError):
+            windows_https('https://registry.npmjs.org/demo/latest')
+        self.assertEqual(run.call_count, 2)
+        with patch('subprocess.run', return_value=SimpleNamespace(returncode=60, stdout=b'')) as run, self.assertRaises(CatalogError):
+            windows_https('https://registry.npmjs.org/demo/latest')
+        run.assert_called_once()
+
+    def test_windows_metadata_transport_keeps_tls_and_redirect_boundaries(self):
+        import os
+        from types import SimpleNamespace
+        if os.name != 'nt':
+            self.skipTest('Windows Schannel transport')
+        response = SimpleNamespace(returncode=0, stdout=b'{"name":"demo"}\n200')
+        with patch('subprocess.run', return_value=response) as run:
+            self.assertEqual(windows_https('https://api.github.com/repos/owner/repo'), {'name':'demo'})
+            args = run.call_args.args[0]
+            self.assertEqual(args[1], '--disable')
+            self.assertIn('--http1.1', args)
+            self.assertNotIn('--insecure', args)
+            self.assertNotIn('--location', args)
+            self.assertIn('--max-filesize', args)
+            for bad in ('http://api.github.com/x', 'https://localhost/x', 'https://user:secret@api.github.com/x',
+                        'https://api.github.com:invalid/x', 'https://api.github.com:8080/x'):
+                with self.assertRaises(CatalogError):
+                    windows_https(bad)
+            run.assert_called_once()
+        for body, code in [(b'{}\n302', 0), (b'{}\n200', 60), (b'{}\n404', 0)]:
+            with patch('subprocess.run', return_value=SimpleNamespace(returncode=code,stdout=body)), self.assertRaises(CatalogError):
+                windows_https('https://api.github.com/repos/owner/repo')
+
     def setUp(self):
         self.catalog = Catalog()
 

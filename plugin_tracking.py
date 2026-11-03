@@ -27,6 +27,7 @@ from patch_modes import PatchError, PatchModes, file_hash, put, sha
 from runtime_context import RuntimeContext
 from storage import ContentStore, write_json
 from version_store import VersionStore
+from installer_policy import install_arguments, failure_hint, protect_other_builds
 
 
 class TrackingError(PatchError):
@@ -45,7 +46,7 @@ class PluginTracking:
         self._owned_session = None
         self._process = None
         self._quiet = None
-        self.store = ContentStore(self.root)
+        self.store = ContentStore(self.core.context.base_patch_root / 'tracking')
         self.versions = VersionStore(manager.profile, Path(manager.settings['executable']), self.store, self.core.archive_source,
                                     manager.verification_cache)
         self.core.bind_versions(self.versions)
@@ -220,6 +221,55 @@ class PluginTracking:
             if not self.equal(a, b):
                 result.append({'key': key, 'before': a, 'after': b})
         return result
+
+    def capture_adapter(self, plugins, before, changes, *, view=None):
+        """Split a supervised installation between archive and ordinary layers.
+
+        The pre-install snapshot is authoritative, including when a plugin's
+        own backup belongs to an older host. Unowned changes stay in the generic
+        transaction rather than being accepted into the native baseline.
+        """
+        core = self.core
+        state = core.capture(plugins, view=view, persist=False)
+        owned = {core.app, core.archive, core.resources / 'app.asar.bak'}
+        owned.update(Path(item['active']) for item in state['directories'])
+        before_paths = {self.target(key): entry for key, entry in before.items()}
+        for item in state['files']:
+            path = Path(item['path'])
+            entry = before_paths.get(path)
+            if entry and entry['type'] != 'file':
+                raise TrackingError('安装前的补丁目标不是普通文件，已保留检查点：' + str(path))
+            item['native'] = core.blob(self.blob_bytes(entry['hash'])) if entry else None
+            owned.add(path)
+        for item in state['directories']:
+            path = Path(item['active'])
+            if any(p == path or p.is_relative_to(path) for p in before_paths):
+                raise TrackingError('安装前已存在同名预设目录，不能把用户目录整体停用：' + str(path))
+        # Bind the final native bytes into the immutable adapter revision.
+        state = self.versions.bind_adapter(state, core.adapter.plugin, package=state['package'])
+        owned_keys = []
+        for scope, base in self.scopes.items():
+            for root in owned:
+                if root == base:
+                    owned_keys.append((scope + '|', True))
+                elif root.is_relative_to(base):
+                    owned_keys.append((scope + '|' + root.relative_to(base).as_posix(), False))
+        remaining = []
+        for item in changes:
+            if any(item['key'].startswith(key) if whole_scope else
+                   item['key'] == key or item['key'].startswith(key + '/') for key, whole_scope in owned_keys):
+                continue
+            path = self.target(item['key'])
+            entry = item['after']
+            if entry and entry['type'] == 'file' and view is not None:
+                key_hash = self.store_file(path, view.entries[path]['stamp'])
+                if key_hash != entry['hash']:
+                    raise TrackingError('记录期间文件再次变化，已保留检查点：' + str(path))
+            remaining.append(item)
+        self.operations(remaining)
+        self.operations(remaining, False)
+        core.save(state)
+        return remaining
 
     def operations(self, changes, enable=True):
         result = []
@@ -463,26 +513,31 @@ class PluginTracking:
                 self.busy = False
         threading.Thread(target=run, daemon=True).start()
 
+    @staticmethod
+    def validate_install(name, source=''):
+        if not isinstance(name, str) or not PLUGIN_NAME.fullmatch(name) or is_adapter(name):
+            raise TrackingError('请输入有效的新插件包名。内置适配插件使用专用还原机制。')
+        if (not isinstance(source, str) or len(source) > 2048 or source.startswith('-')
+                or any(char in source for char in ('\n', '\r', '\x00'))):
+            raise TrackingError('安装来源格式无效。')
+        if urlparse(source).username or urlparse(source).password:
+            raise TrackingError('安装地址不能包含账号密码，请使用已配置的包管理器认证。')
+
     def begin(self, name, source=''):
         with self.manager.lock:
+            self.validate_install(name, source)
             self.manager.require_stopped()
             self.manager.require_executable()
             self.manager.runtime_repair.require_ready()
             self.guard(check_files=True)
-            if not isinstance(name, str) or not PLUGIN_NAME.fullmatch(name) or is_adapter(name):
-                raise TrackingError('请输入有效的新插件包名。内置适配插件使用专用还原机制。')
-            if (not isinstance(source, str) or len(source) > 2048 or source.startswith('-')
-                    or any(char in source for char in ('\n', '\r', '\x00'))):
-                raise TrackingError('安装来源格式无效。')
-            if urlparse(source).username or urlparse(source).password:
-                raise TrackingError('安装地址不能包含账号密码，请使用已配置的包管理器认证。')
             value = self.load()
             core_state = self.core.load()
             if (self.root / 'switch.json').exists():
                 raise TrackingError('上次组合切换尚未完成，请先应用当前组合以完成恢复，再开始记录。')
             raw, obj, bundles = self.manager.manifest()
             existing = self.manager.discover(obj, bundles)
-            unknown = [p['id'] for p in existing if p['id'] not in value['records'] and not is_adapter(p['id'])]
+            unknown = [p['id'] for p in existing if p['id'] not in value['records'] and not is_adapter(p['id'])
+                       and p['id'] not in value.get('suspended', {})]
             if unknown:
                 raise TrackingError('已存在没有安装前记录的插件，不能把未知改动当作原始文件：' + '、'.join(unknown))
             self.check_versions(existing, [p['id'] for p in existing if p['enabled']])
@@ -494,7 +549,7 @@ class PluginTracking:
                 value = self.load()
                 raw, obj, bundles = self.manager.manifest()
             plugins = self.manager.discover(obj, bundles)
-            if name not in value['records'] and any(p['id'] == name for p in plugins):
+            if name not in value['records'] and any(p['id'] == name for p in plugins) and not (source and name in value.get('suspended', {})):
                 raise TrackingError('此插件已安装且没有安装前记录，无法补回已经发生的改动。请在安装新插件之前开始记录。')
             value['session'] = RecordingSession(
                 id=uuid.uuid4().hex, plugin=name, source=source, phase=RecordingPhase.PREPARING,
@@ -561,15 +616,15 @@ class PluginTracking:
                    DSH_DESKTOP_INSTALL=str(resources.parent))
         log = self.root / 'logs' / (session_id + '.log')
         log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open('wb') as output:
+        with protect_other_builds(self.manager, name, env), log.open('wb') as output:
             process = subprocess.Popen([self.manager.settings['executable'], '--expose-internals', str(entry),
-                                        'plugin', '--profile', 'desktop', 'add', source],
+                                        'plugin', '--profile', 'desktop', *install_arguments(name, source)],
                                        cwd=str(self.manager.profile), env=env, stdin=subprocess.DEVNULL,
                                        stdout=output, stderr=subprocess.STDOUT,
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             code = process.wait()
         if code:
-            raise TrackingError(f'官方安装器退出码 {code}，安装前快照已保留。可修复后继续记录，日志：{log}')
+            raise TrackingError(f'官方安装器退出码 {code}，安装前快照已保留。{failure_hint(log)}可修复后继续记录，日志：{log}')
         _, obj, bundles = self.manager.manifest()
         if not any(p['id'] == name and p['available'] for p in self.manager.discover(obj, bundles)):
             raise TrackingError('安装结果中找不到指定插件包名，请检查来源是否与包名一致。')
@@ -815,6 +870,8 @@ class PluginTracking:
                                       'baseVersions': session.get('baseVersions', {}),
                                       'manifestBefore': session.get('manifestBefore'), 'package': package}
             record = value['records'][name]
+            value.get('suspended', {}).pop(name, None)
+            value.get('suspendedPackages', {}).pop(name, None)
             record['revision'] = self.versions.revision(name, record, package, session.get('source', ''),
                                                        previous.get('revision') if previous else None)
             # The new recording sits on top of every layer that stayed enabled.

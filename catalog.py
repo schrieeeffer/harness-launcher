@@ -33,6 +33,53 @@ class CatalogError(Exception):
     pass
 
 
+def windows_https(url):
+    """Retry public metadata with Windows' normal Schannel certificate trust.
+
+    No user curl config, redirects, credentials or insecure TLS options. This
+    handles Python trust-store/handshake failures without disabling verification.
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+    try:
+        parsed = urlparse(url)
+        valid = (parsed.scheme == 'https' and parsed.hostname in {'registry.npmjs.org', 'registry.npmmirror.com', 'api.github.com'}
+                 and not parsed.username and not parsed.password and parsed.port in (None, 443))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise CatalogError('不支持的数据源。')
+    executable = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'System32/curl.exe'
+    if os.name != 'nt' or not executable.is_file():
+        raise CatalogError('无法连接数据源，请检查网络后重试。')
+    try:
+        command = [str(executable), '--disable', '--http1.1', '--silent', '--show-error',
+            '--proto', '=https', '--max-time', '20', '--max-filesize', str(6 * 1024 * 1024),
+            '--header', 'Accept: application/json', '--user-agent', 'harness-launcher',
+            '--write-out', '\n%{http_code}', url]
+        options = dict(stdin=subprocess.DEVNULL, capture_output=True, timeout=25,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        result = subprocess.run(command, **options)
+        if result.returncode == 35:
+            # Some Windows/proxy stacks fail newer TLS negotiation. Retry this
+            # read-only request once with TLS 1.2; certificate errors (60) never
+            # trigger a retry, and certificate/hostname checks stay enabled.
+            result = subprocess.run(command[:-1] + ['--tlsv1.2', '--tls-max', '1.2', url], **options)
+        if result.returncode or len(result.stdout) > 6 * 1024 * 1024 + 4:
+            raise CatalogError('数据源连接或证书校验失败，请检查网络后重试。')
+        raw, status = result.stdout.rsplit(b'\n', 1)
+        if status == b'404':
+            raise CatalogError('未找到该包或仓库。')
+        if status in (b'403', b'429'):
+            raise CatalogError('数据源限流，请稍后重试。')
+        if status != b'200':
+            raise CatalogError('数据源未返回成功响应，未跟随重定向。')
+        return json.loads(raw)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise CatalogError('无法读取数据源，请检查网络后重试。') from exc
+
+
 class PublicRedirects(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         parsed = urlparse(newurl)
@@ -87,7 +134,13 @@ class Catalog:
             if exc.code == 404:
                 raise CatalogError('未找到该包或仓库。') from exc
             raise CatalogError(f'数据源暂不可用（HTTP {exc.code}）。') from exc
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
+        except (URLError, TimeoutError, OSError) as exc:
+            import os
+            if os.name == 'nt':
+                with self.slots:
+                    return windows_https(url)
+            raise CatalogError('无法连接数据源，请检查网络或尝试中国大陆镜像。') from exc
+        except ValueError as exc:
             raise CatalogError('无法连接数据源，请检查网络或尝试中国大陆镜像。') from exc
 
     def cached(self, key, task, ttl=300):

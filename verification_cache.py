@@ -151,6 +151,9 @@ class NtfsFingerprint:
 
 class VerifiedContentCache:
     LIMIT = 100000
+    # pnpm can hardlink several package paths to one physical file. Serialize
+    # that identity's read/USN-close cycle; independent files stay concurrent.
+    _identity_locks = tuple(threading.RLock() for _ in range(64))
 
     def __init__(self, path, fingerprint=None):
         self.path = Path(path)
@@ -204,43 +207,56 @@ class VerifiedContentCache:
                 if validate:
                     validate()
                 return result
-            # The strong, write-excluding handle already checks regular-file
-            # type and stability. Do not open the path twice more with lstat.
-            if expected_stamp is not None and (before[5], (before[3] - 116444736000000000) * 100) != tuple(expected_stamp[:2]):
-                raise PatchError('预检期间文件发生变化，请刷新重试：' + str(path))
-            key = ':'.join(map(str, before))
-            with self.lock:
-                known = self.entries.get(key)
-            result = known if known is not None else (read_stamp.hash_content() if hasattr(read_stamp, 'hash_content') else reader(path))
-            if read_stamp() != before:
-                raise PatchError('校验期间文件发生变化，请刷新重试：' + str(path))
-            # End any accumulated reason cycle before caching new content.
-            # Otherwise an attribute-only reader can keep a prior write reason
-            # alive and hide a later same-timestamp write behind the same USN.
-            barrier = None
-            if (known is None or certify) and hasattr(read_stamp, 'close_record'):
-                barrier = read_stamp.close_record()
-                after = read_stamp()
-                if after is None or before[:7] != after[:7]:
-                    raise PatchError('校验期间文件发生变化，请刷新重试：' + str(path))
-                if barrier is None:
-                    return result  # Full read is usable, but cannot seed a hit.
-                if after[7] != barrier:
-                    raise PatchError('校验期间文件变更日志发生变化，请刷新重试：' + str(path))
-                before = after
+            with self.identity_guard(path, read_stamp, before) as before:
+                # The strong, write-excluding handle already checks regular-file
+                # type and stability. Do not open the path twice more with lstat.
+                if expected_stamp is not None and (before[5], (before[3] - 116444736000000000) * 100) != tuple(expected_stamp[:2]):
+                    raise PatchError('预检期间文件发生变化，请刷新重试：' + str(path))
                 key = ':'.join(map(str, before))
-            if certify and barrier is not None:
-                certify(before, barrier)
-            if known is None or barrier is not None:
                 with self.lock:
-                    identity = ':'.join(map(str, before[:3]))
-                    previous = self.identities.get(identity)
-                    if previous is not None:
-                        self.entries.pop(previous, None)
-                    self.entries[key] = result
-                    self.identities[identity] = key
-                    self.dirty = True
-            return result
+                    known = self.entries.get(key)
+                result = known if known is not None else (read_stamp.hash_content() if hasattr(read_stamp, 'hash_content') else reader(path))
+                if read_stamp() != before:
+                    raise PatchError('校验期间文件发生变化，请刷新重试：' + str(path))
+                # End any accumulated reason cycle before caching new content.
+                # Otherwise an attribute-only reader can keep a prior write reason
+                # alive and hide a later same-timestamp write behind the same USN.
+                barrier = None
+                if (known is None or certify) and hasattr(read_stamp, 'close_record'):
+                    barrier = read_stamp.close_record()
+                    after = read_stamp()
+                    if after is None or before[:7] != after[:7]:
+                        raise PatchError('校验期间文件发生变化，请刷新重试：' + str(path))
+                    if barrier is None:
+                        return result  # Full read is usable, but cannot seed a hit.
+                    if after[7] != barrier:
+                        raise PatchError('校验期间文件变更日志发生变化，请刷新重试：' + str(path))
+                    before = after
+                    key = ':'.join(map(str, before))
+                if certify and barrier is not None:
+                    certify(before, barrier)
+                if known is None or barrier is not None:
+                    with self.lock:
+                        identity = ':'.join(map(str, before[:3]))
+                        previous = self.identities.get(identity)
+                        if previous is not None:
+                            self.entries.pop(previous, None)
+                        self.entries[key] = result
+                        self.identities[identity] = key
+                        self.dirty = True
+                return result
+
+
+    @contextmanager
+    def identity_guard(self, path, read_stamp, before):
+        lock = self._identity_locks[hash(before[:3]) % len(self._identity_locks)]
+        with lock:
+            # Resample even after an uncontended acquire: another alias could
+            # finish between our initial identity read and taking this lock.
+            current = read_stamp()
+            if current is None or current[:7] != before[:7]:
+                raise PatchError('等待校验期间文件身份或内容标识发生变化，请重试：' + str(path))
+            yield current
 
     def flush(self):
         with self.lock:

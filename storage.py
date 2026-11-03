@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import threading
+import time
 import uuid
 
 from domain import DomainError, OBJECT_KINDS, digest, natural, object_reference, relative_path
@@ -25,7 +27,17 @@ def atomic_write(path, data):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        for attempt in range(8):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError as exc:
+                # Windows read handles (status polling, antivirus indexing)
+                # can briefly deny replacement. Keep the same flushed temp;
+                # never remove the destination or weaken permissions.
+                if os.name != 'nt' or getattr(exc, 'winerror', None) not in (5, 32, 33) or attempt == 7:
+                    raise
+                time.sleep(min(.01 * 2 ** attempt, .25))
     finally:
         temp.unlink(missing_ok=True)
 
@@ -44,6 +56,11 @@ def hash_file(path):
 
 
 class ContentStore:
+    # Fixed-size writer locks prevent identical blobs from racing publication
+    # on Windows, where replacement fails while another reader has it open.
+    # Locks are shared across store instances, never retained per file/path.
+    _blob_writers = tuple(threading.RLock() for _ in range(64))
+
     def __init__(self, root):
         self.root = Path(root).absolute()
 
@@ -100,11 +117,12 @@ class ContentStore:
 
     def put_blob(self, data):
         key = hashlib.sha256(data).hexdigest()
-        path = self._path('blobs/' + key)
-        if path.exists():
-            self.blob_bytes(key)
-        else:
-            atomic_write(path, data)
+        with self._blob_writers[int(key[:2], 16) % len(self._blob_writers)]:
+            path = self._path('blobs/' + key)
+            if path.exists():
+                self.blob_bytes(key)
+            else:
+                atomic_write(path, data)
         return key
 
     def blob_bytes(self, key):
@@ -131,6 +149,7 @@ class ContentStore:
             raise StorageError('快照期间文件仍在变化：' + str(path))
         # Windows ctime can mean creation time, so equal metadata does not prove
         # equal bytes. A cached identity may only avoid a write, never a read.
+        actual = None
         if cached and cached.get('stamp') == stamp:
             key = cached.get('hash')
             self.blob_bytes(key)
@@ -139,6 +158,25 @@ class ContentStore:
                 raise StorageError('快照期间文件仍在变化：' + str(path))
             if actual == key:
                 return key
+        # The destination is content-addressed. Hash the source before opening
+        # a temporary file so an existing checkpoint never rewrites/fsyncs the
+        # same bytes. Still verify both source metadata and stored content.
+        if actual is None:
+            actual = hash_file(path)
+        if current() != stamp:
+            raise StorageError('快照期间文件仍在变化：' + str(path))
+        with self._blob_writers[int(actual[:2], 16) % len(self._blob_writers)]:
+            return self._store_verified_file(path, stamp, actual, current)
+
+    def _store_verified_file(self, path, stamp, actual, current):
+        if current() != stamp:
+            raise StorageError('快照期间文件仍在变化：' + str(path))
+        destination = self._path('blobs/' + actual)
+        if destination.exists():
+            self.blob_bytes(actual)
+            if current() != stamp:
+                raise StorageError('快照期间文件仍在变化：' + str(path))
+            return actual
         directory = self._path('blobs')
         directory.mkdir(parents=True, exist_ok=True)
         temp = directory / (uuid.uuid4().hex + '.tmp')
@@ -153,6 +191,8 @@ class ContentStore:
             if current() != stamp:
                 raise StorageError('快照期间文件仍在变化：' + str(path))
             key = h.hexdigest()
+            if key != actual:
+                raise StorageError('快照期间文件内容仍在变化：' + str(path))
             destination = self._path('blobs/' + key)
             if destination.exists():
                 self.blob_bytes(key)

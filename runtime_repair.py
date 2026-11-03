@@ -214,6 +214,28 @@ class SevenZip:
         self.run('x', '-y', '-sccUTF-8', payload, 'resources\\runtime\\*', *required, '-o' + str(stage / 'payload'))
         return stage / 'payload', expected
 
+    def extract_all(self, installer, stage):
+        payload, entries = self.unpack(installer, stage)
+        expected = {e['path']: e['size'] for e in entries if not e['folder']}
+        required = {'DeepSeek Harness.exe', 'resources/app.asar'} | {'resources/runtime/' + n for n in ANCHORS}
+        if not required <= expected.keys():
+            fail('官方包缺少宿主或必需运行时文件。')
+        if shutil.disk_usage(stage).free < sum(expected.values()) + 64 * 1024 ** 2:
+            fail('暂存磁盘空间不足。')
+        self.run('x', '-y', '-spd', '-sccUTF-8', payload, '-o' + str(stage / 'payload'))
+        return stage / 'payload', expected
+
+    def extract_members(self, installer, stage, names):
+        payload, entries = self.unpack(installer, stage)
+        available = {e['path'] for e in entries if not e['folder']}
+        if not set(names) <= available:
+            fail('安装包缺少待恢复文件。')
+        listing = stage / 'members.txt'
+        listing.write_text('\n'.join(names) + '\n', encoding='utf-8')
+        self.run('x', '-y', '-spd', '-sccUTF-8', '-scsUTF-8', payload,
+                 '@' + str(listing), '-o' + str(stage / 'payload'))
+        return stage / 'payload'
+
 
 class RuntimeRepair:
     def __init__(self, manager):
@@ -289,10 +311,18 @@ class RuntimeRepair:
                 missing.append(name)
             else:
                 with read_lease(path):
-                    if path.stat().st_size != entry['size'] or hash_file(path) != entry['sha256']:
+                    if path.stat().st_size != entry['size'] or self.manager.verification_cache.hash(path, hash_file) != entry['sha256']:
                         conflicts.append(name)
             if i % 50 == 0 or i == len(expected):
                 report_progress('files', '核验现有运行时；保留非官方文件', i, len(expected))
+        from runtime_integrity import python_extras, verified_python_caches
+        official_files = {'resources/runtime/' + n: e['sha256'] for n, e in expected.items()}
+        conflicts.extend(n.removeprefix('resources/runtime/') for n in python_extras(self.manager, self.exe.parent, official_files))
+        if conflicts:
+            accepted = verified_python_caches(self.manager, self.exe.parent,
+                official_files,
+                ['resources/runtime/' + n for n in conflicts])
+            conflicts = [n for n in conflicts if 'resources/runtime/' + n not in accepted]
         return missing, conflicts
 
     def discard(self):
@@ -309,71 +339,56 @@ class RuntimeRepair:
         return {'message': '已关闭预览并清理本次临时解压文件。'}
 
     def prepare(self, installer=None, expected_sha512=None):
-        with self.manager.lock:
+        with self.manager.lock, self.manager.verification_cache.session(), self.manager.official_packages.session():
             self.idle()
             self.discard()
-            source, expected_sha = self.candidate(installer, expected_sha512)
-            extractor = SevenZip()
-            staging = safe_path(self.folder / 'staging')
-            staging.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(staging).free < source.stat().st_size * 2 + 64 * 1024 ** 2:
-                fail('暂存目录所在磁盘空间不足，无法安全解包官方安装包。')
-            stage = staging / uuid.uuid4().hex
-            stage.mkdir()
-            self.plan = {'stage': stage}
-            try:
-                report_progress('packages', '核验官方安装包 SHA-512 和发布者签名')
-                cached = stage / 'installer.exe'
-                with read_lease(source):
-                    shutil.copyfile(source, cached)
-                with read_lease(cached):
-                    with cached.open('rb') as stream:
-                        sha512 = hashlib.file_digest(stream, 'sha512').digest()
-                    if sha512 != expected_sha:
-                        fail('安装包 SHA-512 不匹配，未修改安装目录。', 'runtime_checksum_mismatch')
-                    signed = signature(cached)
-                    report_progress('packages', '解出同版本官方运行时（可能需要数分钟）')
-                    payload, sizes = extractor.extract(cached, stage)
-                archive = self.resources / 'app.asar'
-                # Active/retained plugin archives are deliberately not guessed.
-                if not regular(archive):
-                    fail('缺少当前 app.asar，无法证明同版本官方基线；请先处理宿主安装或插件状态。')
-                with read_lease(self.exe), read_lease(archive):
-                    host = {str(self.exe): hash_file(self.exe), str(archive): hash_file(archive)}
-                    if host[str(self.exe)] != hash_file(payload / 'DeepSeek Harness.exe') or host[str(archive)] != hash_file(payload / 'resources/app.asar'):
-                        fail('安装包与当前主程序或 app.asar 不一致，不能跨版本修复或覆盖插件补丁。', 'runtime_host_mismatch')
-                runtime = payload / 'resources/runtime'
-                entries = {}
-                for i, (name, size) in enumerate(sizes.items(), 1):
-                    path = safe_path(runtime / name)
-                    if not regular(path) or path.stat().st_size != size:
-                        fail('解压文件与官方清单不一致：' + name)
-                    entries[name] = {'size': size, 'sha256': hash_file(path)}
-                    if i % 50 == 0 or i == len(sizes):
-                        report_progress('files', '建立官方运行时文件校验清单', i, len(sizes))
-                # Authentication and host equality are now bound to in-memory
-                # hashes. Retain only runtime payload until execute/discard.
-                for temporary in (cached, stage / 'app-64.7z', payload / 'DeepSeek Harness.exe', payload / 'resources/app.asar'):
-                    try:
-                        safe_path(temporary).unlink(missing_ok=True)
-                    except OSError:
-                        pass  # Final cleanup will retry; never mask verified data.
-                missing, conflicts = self.inventory(entries)
-                self.plan.update(token=uuid.uuid4().hex, created=time.monotonic(), signed=signed,
-                    sha512=base64.b64encode(sha512).decode(), host=host, runtime=runtime,
-                    entries=entries, missing=missing, conflicts=conflicts)
-                return {'token': self.plan['token'], 'version': signed['version'], 'publisher': signed['publisher'],
-                    'sha512': self.plan['sha512'], 'total': len(entries), 'missing': missing, 'conflicts': conflicts,
-                    'bytes': sum(entries[n]['size'] for n in missing),
-                    'message': f'已验证官方签名及宿主一致性；共 {len(entries)} 个文件，缺失 {len(missing)} 个，内容冲突 {len(conflicts)} 个。',
-                    'preserved': ['账号、会话和工作区', '插件、共享依赖及已有文件', '补丁记录和回滚数据'],
-                    'blocked': ['已有文件与官方内容不同；先处理插件改动或损坏文件，修复不会覆盖。'] if conflicts else []}
-            except BaseException:
-                self.discard()
-                raise
+            package = self.manager.official_packages.inspect(installer, expected_sha512)
+            return self.prepare_package(package)
+
+    def prepare_package(self, package):
+        """Use an already authenticated inventory shared with official updates."""
+        self.idle()
+        self.discard()
+        value = package['value']
+        archive = self.resources / 'app.asar'
+        host = {}
+        for path, name in ((self.exe, 'DeepSeek Harness.exe'), (archive, 'resources/app.asar')):
+            with read_lease(path):
+                actual = self.manager.verification_cache.hash(path, hash_file)
+                if actual != value['files'][name]['sha256']:
+                    fail('安装包与当前主程序或 app.asar 不一致，不能跨版本修复或覆盖插件补丁。', 'runtime_host_mismatch')
+                host[str(path)] = actual
+        entries = {name.removeprefix('resources/runtime/'): entry for name, entry in value['files'].items()
+                   if name.startswith('resources/runtime/')}
+        missing, conflicts = self.inventory(entries)
+        stage = safe_path(self.folder / 'staging' / uuid.uuid4().hex)
+        stage.mkdir(parents=True)
+        self.plan = {'stage': stage}
+        try:
+            runtime = stage / 'runtime'
+            if missing and not conflicts:
+                names = ['resources/runtime/' + name for name in missing]
+                payload = self.manager.official_packages.materialize(package, names, stage)
+                for name in missing:
+                    dest = runtime / name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(safe_path(payload / 'resources/runtime' / name), dest)
+            self.plan.update(token=uuid.uuid4().hex, created=time.monotonic(), signed=value['signed'],
+                sha512=value['sha512'], host=host, runtime=runtime,
+                entries=entries, missing=missing, conflicts=conflicts)
+            return {'token': self.plan['token'], 'version': value['signed']['version'],
+                'publisher': value['signed']['publisher'], 'sha512': value['sha512'],
+                'total': len(entries), 'missing': missing, 'conflicts': conflicts,
+                'bytes': sum(entries[n]['size'] for n in missing),
+                'message': f'已验证官方签名及宿主一致性；共 {len(entries)} 个文件，缺失 {len(missing)} 个，内容冲突 {len(conflicts)} 个。',
+                'preserved': ['账号、会话和工作区', '插件、共享依赖及已有文件', '补丁记录和回滚数据'],
+                'blocked': ['已有文件与官方内容不同；先处理插件改动或损坏文件，修复不会覆盖。'] if conflicts else []}
+        except BaseException:
+            self.discard()
+            raise
 
     def execute(self, token):
-        with self.manager.lock:
+        with self.manager.lock, self.manager.verification_cache.session():
             self.idle()
             plan = self.plan
             if not plan or not isinstance(token, str) or token != plan.get('token') or time.monotonic() - plan.get('created', 0) > 1800:

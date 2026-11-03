@@ -94,7 +94,7 @@ class SwitchPlan:
             for entry in (op['before'], op['after']):
                 if entry and entry['type'] == 'file':
                     self.tracker.blob_bytes(entry['hash'])
-            source = self.tracker.root / 'blobs' / op['after']['hash'] if op['after'] and op['after']['type'] == 'file' else None
+            source = self.tracker.store._path('blobs/' + op['after']['hash']) if op['after'] and op['after']['type'] == 'file' else None
             if support is not None and op['after'] is not None:
                 self._parents(view, path.parent, result, support)
             try:
@@ -144,7 +144,7 @@ class SwitchPlan:
                 op['afterMtime'] = time.time_ns() if after_bytes is not None else None
                 after = {'type': 'file', 'hash': op['after'], 'size': len(after_bytes),
                          'mtime': op['afterMtime']} if after_bytes is not None else None
-                source = self.core.root / 'blobs' / op['after'] if after else None
+                source = self.core.store._path('blobs/' + op['after']) if after else None
                 if view.change(path, before, after, self.tracker.equal, source):
                     operations.append(op)
 
@@ -154,7 +154,7 @@ class SwitchPlan:
         for key, entry in snapshot.items():
             if entry['type'] != 'file':
                 continue
-            destination = self.tracker.root / 'blobs' / entry['hash']
+            destination = self.tracker.store._path('blobs/' + entry['hash'])
             if not destination.exists():
                 source = view.entries[self.tracker.target(key)]['source']
                 info = source.stat()

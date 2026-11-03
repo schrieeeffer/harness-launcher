@@ -20,10 +20,30 @@ _reporter = ContextVar('operation_reporter', default=None)
 
 
 def report_progress(stage, label, completed=None, total=None, unit='files'):
-    """Publish actual work, never a time-based estimate; absent outside HTTP work."""
+    """Publish actual work; None preserves the enclosing operation's stage."""
     reporter = _reporter.get()
     if reporter is not None:
         reporter(stage, label, completed, total, unit)
+
+
+@contextmanager
+def progress_workflow():
+    """Keep nested checks in the caller's current workflow phase."""
+    reporter = _reporter.get()
+    current = [None, None]
+    def phase(stage, label):
+        current[:] = stage, label
+        if reporter:
+            reporter(stage, label, None, None, 'files')
+    def report(stage, detail, completed=None, total=None, unit='files'):
+        label = current[1]
+        reporter(current[0] or stage, (label + ' · ' + detail) if label and detail != label else detail,
+                 completed, total, unit)
+    token = _reporter.set(report if reporter else None)
+    try:
+        yield phase
+    finally:
+        _reporter.reset(token)
 
 
 class OperationLog:
@@ -61,7 +81,7 @@ class OperationLog:
 
     def progress(self, operation_id, stage, label, completed=None, total=None, unit='files'):
         stages = ('check', 'packages', 'files', 'sync', 'launch')
-        if stage not in stages or not isinstance(label, str):
+        if (stage is not None and stage not in stages) or not isinstance(label, str):
             raise ValueError('Invalid progress stage')
         for value in (completed, total):
             if value is not None and (type(value) is not int or value < 0):
@@ -72,6 +92,8 @@ class OperationLog:
             # Late callbacks can never modify the next operation.
             if self._current is None or self._current['id'] != operation_id:
                 return
+            if stage is None:
+                stage = (self._current.get('progress') or {}).get('stage', 'packages')
             self._current['progress'] = {'stage': stage, 'label': label,
                 'step': stages.index(stage) + 1, 'steps': len(stages),
                 'completed': completed, 'total': total, 'unit': unit}

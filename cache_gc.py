@@ -22,8 +22,39 @@ class CacheGC:
         manager, tracker = self.manager, self.manager.tracking
         manager.maintenance.require_idle()
         tracker.verify_idle()
-        stores = {'tracking': tracker.store, 'adapter': tracker.core.store}
+        stores = {'tracking': tracker.store, 'adapter': tracker.core.store, 'official': manager.official_packages.store}
+        # Official inventories contain hashes for files that were never saved as
+        # rollback blobs. Index names once instead of probing every hash through
+        # every store and its Windows ancestors. This is only an inventory hint:
+        # every object read and every candidate still passes _path validation.
+        # Retaining a blob name does not access its file; only reclaiming a blob
+        # requires path and content checks, which collect() performs as before.
+        # Use this same inventory for the sweep, so an object created after the
+        # inventory cannot become an unmarked deletion candidate in this pass.
+        inventory = {}
+        for name, store in stores.items():
+            entries = set()
+            for kind in sorted(OBJECT_KINDS | {'blobs'}):
+                for path in store._path(kind).glob('*'):
+                    ref = kind + '/' + path.name
+                    valid = HASH.fullmatch(path.name) if kind == 'blobs' else REF.fullmatch(ref)
+                    if valid:
+                        entries.add(ref)
+            inventory[name] = entries
         roots = [manager.settings, tracker.load(), tracker.core.load(), manager.maintenance.load()]
+        # Generations share content stores; every retained generation is a root.
+        base = tracker.core.context.base_patch_root
+        for folder in [base, *(base / 'generations').glob('*')]:
+            for relative in ('state.json', 'tracking/registry.json', 'tracking/official-host.json'):
+                path = stores['adapter']._path((folder / relative).relative_to(base).as_posix())
+                if path.is_file():
+                    roots.append(json.loads(path.read_bytes()))
+            for path in (folder / 'tracking/maintenance/history').glob('*.json'):
+                roots.append(json.loads(stores['adapter']._path(path.relative_to(base).as_posix()).read_bytes()))
+        for path in (base / 'official-update/history').glob('*.json'):
+            roots.append(json.loads(stores['adapter']._path(path.relative_to(base).as_posix()).read_bytes()))
+        for path in (stores['official'].root / 'receipts').glob('*.json'):
+            roots.append(json.loads(stores['official']._path('receipts/' + path.name).read_bytes()))
         approval = tracker.root / 'official-host.json'
         if approval.exists():
             roots.append(json.loads(tracker.store._path('official-host.json').read_bytes()))
@@ -56,7 +87,7 @@ class CacheGC:
                 # both also supports existing adapter/blob references.
                 found = False
                 for name, store in stores.items():
-                    if store._path(value).is_file():
+                    if value in inventory[name]:
                         found = True
                         reachable[name].add(value)
                         if (name, value) not in seen:
@@ -68,23 +99,18 @@ class CacheGC:
             elif isinstance(value, str) and HASH.fullmatch(value):
                 for name, store in stores.items():
                     ref = 'blobs/' + value
-                    if store._path(ref).is_file():
+                    if ref in inventory[name]:
                         reachable[name].add(ref)
         for root in roots:
             visit(root)
         cutoff, files = time.time() - grace, []
         report_progress('files', '正在筛选超过宽限期的无引用对象')
         for name, store in stores.items():
-            for kind in sorted(OBJECT_KINDS | {'blobs'}):
-                for path in store._path(kind).glob('*'):
-                    ref = kind + '/' + path.name
-                    checked = store._path(ref)
-                    if ref in reachable[name] or not checked.is_file():
-                        continue
-                    valid = HASH.fullmatch(path.name) if kind == 'blobs' else REF.fullmatch(ref)
-                    if not valid or checked.stat().st_mtime > cutoff:
-                        continue
-                    files.append({'store': name, 'path': ref, 'bytes': checked.stat().st_size})
+            for ref in sorted(inventory[name] - reachable[name]):
+                checked = store._path(ref)
+                if not checked.is_file() or checked.stat().st_mtime > cutoff:
+                    continue
+                files.append({'store': name, 'path': ref, 'bytes': checked.stat().st_size})
         files.sort(key=lambda item: (item['store'], item['path']))
         token = hashlib.sha256(canonical({'roots': roots, 'files': files})).hexdigest()
         return {'token': token, 'files': files, 'count': len(files), 'bytes': sum(f['bytes'] for f in files),
@@ -95,7 +121,8 @@ class CacheGC:
             preview = self.preview()
             if token != preview['token']:
                 raise LauncherError('清理预览已变化，请重新预览。', code='revision_conflict')
-            stores = {'tracking': self.manager.tracking.store, 'adapter': self.manager.tracking.core.store}
+            stores = {'tracking': self.manager.tracking.store, 'adapter': self.manager.tracking.core.store,
+                      'official': self.manager.official_packages.store}
             count = size = 0
             for item in preview['files']:
                 store, ref = stores[item['store']], item['path']

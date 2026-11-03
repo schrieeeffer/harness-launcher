@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import re
 import stat
@@ -14,6 +15,7 @@ import time
 
 from patch_modes import PatchError, archive_file, file_hash, sha
 from domain import ContentIdentity, DomainError
+from operations import report_progress
 
 
 NAME = re.compile(r'^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$')
@@ -43,9 +45,39 @@ class VersionStore:
     def object(self, kind, value):
         return self.store.object(kind, value)
 
+    @staticmethod
+    def checked_items(items, action, label):
+        """Bound independent reads; publish progress only on the request thread."""
+        items = list(items)
+        total, last_report = len(items), 0
+        report_progress(None, label, 0, total)
+        def update(done):
+            nonlocal last_report
+            now = time.monotonic()
+            if done == total or now - last_report >= .2:
+                report_progress(None, label, done, total)
+                last_report = now
+        if total < 32:
+            for done, item in enumerate(items, 1):
+                result = action(item)
+                update(done)
+                yield item, result
+            return
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix='package-check') as pool:
+            pending = {pool.submit(action, item): item for item in items}
+            try:
+                for done, future in enumerate(as_completed(pending), 1):
+                    result = future.result()
+                    update(done)
+                    yield pending[future], result
+            except BaseException:
+                for future in pending:
+                    future.cancel()
+                raise
+
     def files(self, root, store=True):
         """Capture installed code, not user data; reject ambiguous nested links."""
-        result = {}
+        result, files = {}, {}
         def visit(directory):
             with os.scandir(directory) as scanned:
                 children = sorted(scanned, key=lambda entry: entry.name)
@@ -61,16 +93,22 @@ class VersionStore:
                     result[key] = {'type': 'dir'}
                     visit(child)
                 elif stat.S_ISREG(info.st_mode):
-                    stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-                    digest = self.store.store_file(child, stamp) if store else self.hash(child)
-                    now = child.stat()
-                    if [now.st_size, now.st_mtime_ns, now.st_ctime_ns] != stamp:
-                        raise PatchError('插件代码仍在变化，版本记录未保存：' + str(child))
-                    result[key] = {'type': 'file', 'hash': digest, 'size': info.st_size,
-                                   'executable': bool(info.st_mode & stat.S_IXUSR)}
+                    files[child] = (key, info)
                 else:
                     raise PatchError('插件代码含不支持的文件类型：' + str(child))
         visit(root)
+        def read(child):
+            key, info = files[child]
+            stamp = [info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+            digest = self.store.store_file(child, stamp) if store else self.hash(child)
+            now = child.lstat()
+            if (not stat.S_ISREG(now.st_mode) or getattr(now, 'st_file_attributes', 0) & 0x400
+                    or [now.st_size, now.st_mtime_ns, now.st_ctime_ns] != stamp):
+                raise PatchError('插件代码仍在变化，版本记录未保存：' + str(child))
+            return {'type': 'file', 'hash': digest, 'size': info.st_size,
+                    'executable': bool(info.st_mode & stat.S_IXUSR)}
+        for child, entry in self.checked_items(files, read, ('保存' if store else '校验') + '插件文件：' + root.name):
+            result[files[child][0]] = entry
         return result
 
     def resolve_dependency(self, root, name):
@@ -114,7 +152,9 @@ class VersionStore:
                 resolved = self.resolve_dependency(path, dep)
                 if resolved is None:
                     if dep in peers and dep not in required and dep not in optional:
-                        provided = self.host_dependency(dep)
+                        dsh = meta.get('dsh', {})
+                        client = dsh.get('client', {}) if isinstance(dsh, dict) else {}
+                        provided = self.host_dependency(dep, browser=isinstance(client, dict) and client.get('platform') == 'web')
                         if provided:
                             dependencies[dep] = provided
                             continue
@@ -150,7 +190,7 @@ class VersionStore:
                     result['installMetadata'][name] = self.store.store_file(path, stamp) if store else self.hash(path)
         return result
 
-    def host_dependency(self, name):
+    def host_dependency(self, name, *, browser=False):
         core = self.host_archive
         archive = core.official_archive(self.view)
         if archive is None:
@@ -159,6 +199,12 @@ class VersionStore:
             content = archive_file(archive, 'dsh/node_modules/' + name + '/package.json',
                                    core.resources / 'app.asar.unpacked', self.view)
         except PatchError:
+            if browser:
+                from host_modules import browser_peer
+                provided = browser_peer(core, archive, name, self.view)
+                if provided:
+                    return dict(provided, hostHash=self.hash(self.executable),
+                                archiveHash=self.view.hash(archive) if self.view else self.hash(archive))
             return None
         meta = json.loads(content)
         if meta.get('name') != name:
@@ -171,8 +217,10 @@ class VersionStore:
     def adapter_patch(state):
         return {key: value for key, value in state.items() if key not in ('mode', 'package', 'revision')}
 
-    def bind_adapter(self, state, adapter, source=None):
-        package = self.package_snapshot(adapter, source or 'installed:' + adapter)
+    def bind_adapter(self, state, adapter, source=None, *, package=None):
+        # A supervised capture may revise native-side bytes using its original
+        # checkpoint. Reuse its just-captured package instead of scanning twice.
+        package = package or self.package_snapshot(adapter, source or 'installed:' + adapter)
         revision = self.object('revisions', {'format': 1, 'plugin': adapter, 'adapter': adapter,
             'version': state['pluginVersion'], 'package': package, 'patch': self.adapter_patch(state)})
         return dict(state, package=package, revision=revision)
@@ -191,11 +239,17 @@ class VersionStore:
         # silently associated with a different dependency graph or package tree.
         if capsule != self.capture(name, source, store=False):
             raise PatchError('插件或依赖仍在写入，完整版本尚未保存。')
-        for package in capsule['packages'].values():
-            for entry in package['files'].values():
-                if entry['type'] == 'file':
-                    self.store.blob_bytes(entry['hash'])
+        self.verify_blobs(capsule)
         return self.object('packages', capsule)
+
+    def verify_blobs(self, capsule):
+        keys = {entry['hash'] for package in capsule['packages'].values()
+                for entry in package['files'].values() if entry['type'] == 'file'}
+        keys.update(capsule.get('installMetadata', {}).values())
+        # Same content may occur in several packages; verify each blob once in
+        # this pass, with no persistent trust based on timestamps.
+        for _ in self.checked_items(keys, lambda key: bool(self.store.blob_bytes(key)), '校验恢复副本'):
+            pass
 
     def verify_package(self, name, reference):
         expected = self.store.read_object(reference)
@@ -204,12 +258,7 @@ class VersionStore:
             raise PatchError('插件或依赖内容与版本记录不同，旧补丁不能用于更新后的插件：' + name,
                 code='plugin_identity_changed', details={'plugin': name},
                 recovery='保留记录；先恢复记录对应的插件包及依赖，再从“升级 / 重新记录”开始。仅修改版本号或清空缓存不能恢复旧基线。')
-        for package in expected['packages'].values():
-            for entry in package['files'].values():
-                if entry['type'] == 'file':
-                    self.store.blob_bytes(entry['hash'])
-        for digest in expected.get('installMetadata', {}).values():
-            self.store.blob_bytes(digest)
+        self.verify_blobs(expected)
 
     def verify_external_source(self, name, reference, root):
         """Read-only check before restoring a local link; never overwrite its project."""

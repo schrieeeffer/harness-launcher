@@ -33,11 +33,12 @@ from operations import OperationLog, report_progress
 from plugin_tracking import PluginTracking
 from switch_plan import SwitchPlan
 from catalog import Catalog, CatalogError
+from install_sources import InstallSources
 from verification_cache import VerifiedContentCache
 from runtime_repair import RuntimeRepair
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -200,6 +201,8 @@ class Manager:
         self._maintenance_cache = None
         self._runtime_repair_cache = None
         self._official_host_cache = None
+        self._official_packages_cache = None
+        self._official_update_cache = None
         # Establish the root schema before any tracking object can be created.
         # A first install must remain reopenable even if settings were never edited.
         if not self.settings_file.exists():
@@ -208,7 +211,8 @@ class Manager:
     @property
     def tracking(self):
         with self.lock:
-            identity = (str(self.home), self.settings['executable'])
+            from runtime_context import RuntimeContext
+            identity = (str(self.home), self.settings['executable'], str(RuntimeContext.from_manager(self).patch_root))
             if self._track_cache is None or self._track_cache[0] != identity:
                 self._track_cache = (identity, PluginTracking(self))
             return self._track_cache[1]
@@ -216,10 +220,19 @@ class Manager:
     @property
     def maintenance(self):
         from maintenance import Maintenance
-        identity = (str(self.home), self.settings['executable'])
+        identity = str(self.tracking.root)
         if self._maintenance_cache is None or self._maintenance_cache[0] != identity:
             self._maintenance_cache = (identity, Maintenance(self))
         return self._maintenance_cache[1]
+
+    def tracking_status(self):
+        # A recording worker holds manager.lock while hashing/capturing files.
+        # Status reads must not queue behind that work and time out the UI.
+        # The published tracker reference and its atomically saved registry are
+        # read-only here; mutations still resolve the active tracker under lock.
+        cached = self._track_cache
+        tracker = cached[1] if cached is not None else self.tracking
+        return tracker.summary()
 
     @property
     def runtime_repair(self):
@@ -232,12 +245,27 @@ class Manager:
             return self._runtime_repair_cache[1]
 
     @property
+    def official_packages(self):
+        from official_package import OfficialPackages
+        if self._official_packages_cache is None:
+            self._official_packages_cache = OfficialPackages(self)
+        return self._official_packages_cache
+
+    @property
     def official_host(self):
         from official_host import OfficialHost
-        identity = (str(self.home), self.settings['executable'])
+        identity = str(self.tracking.root)
         if self._official_host_cache is None or self._official_host_cache[0] != identity:
             self._official_host_cache = (identity, OfficialHost(self))
         return self._official_host_cache[1]
+
+    @property
+    def official_update(self):
+        from official_update import OfficialUpdate
+        identity = (str(self.home), self.settings['executable'])
+        if self._official_update_cache is None or self._official_update_cache[0] != identity:
+            self._official_update_cache = (identity, OfficialUpdate(self))
+        return self._official_update_cache[1]
 
     @property
     def home(self):
@@ -356,6 +384,7 @@ class Manager:
             patch_mode['pending'] = patch_mode['pending'] or tracking['pending']
             for plugin in plugins:
                 plugin['tracking'] = ('builtin' if is_adapter(plugin['id']) else 'auto' if plugin['id'] in tracked else 'untracked')
+                plugin['suspended'] = self.tracking.load().get('suspended', {}).get(plugin['id'], '')
             exists = Path(self.settings["executable"]).is_file()
             host_health = self.official_host.status() if exists else {'status': 'blocked', 'message': '找不到 Harness 程序。'}
             if host_health['status'] in ('changed', 'blocked'):
@@ -369,6 +398,7 @@ class Manager:
                     "executableExists": exists,
                     "runtimeHealth": self.runtime_repair.status(),
                     "hostHealth": host_health,
+                    "officialUpdate": self.official_update.status(),
                     "detectedExecutable": str(detected) if detected else None,
                     "schemes": self.settings["schemes"], "lastSelection": self.settings["lastSelection"],
                     "schemeLocks": self.settings.get("schemeLocks", {}),
@@ -387,6 +417,14 @@ class Manager:
         unknown = set(selection) - valid
         if unknown:
             raise MenuError("以下插件缺失或不可用，请刷新后重选：" + "、".join(sorted(unknown)))
+        suspended = self.tracking.load().get('suspended', {})
+        if any(name in suspended for name in selection):
+            raise MenuError('以下插件尚未完成当前官方版本验证，请在“更新与卸载”检查更新并重新验证：' + '、'.join(name for name in selection if name in suspended),
+                            code='plugin_host_incompatible')
+
+    def active_plugins(self, plugins):
+        suspended = self.tracking.load().get('suspended', {})
+        return [p for p in plugins if p['id'] not in suspended]
 
     def backup(self, raw, bundles, reason):
         stamp = datetime.now().astimezone()
@@ -443,11 +481,37 @@ class Manager:
     def rollback_layers(self, receipt):
         SwitchPlan(self.tracking).rollback(receipt)
 
+    def begin_tracking(self, name, source=''):
+        """Adopt an authenticated host before recording against its new baseline."""
+        with self.lock, self.verification_cache.session():
+            PluginTracking.validate_install(name, source)
+            self.require_stopped()
+            self.require_executable()
+            self.tracking.verify_idle()
+            report_progress('check', '检查安装条件与官方版本基线')
+            update = self.official_update.before_launch()
+            # Adoption changes the active generation. Never retain the old
+            # tracker here or publish the new session into an obsolete baseline.
+            result = self.tracking.begin(name, source)
+            if update:
+                result['officialUpdate'] = update
+            return result
+
     def apply(self, selection, revision, launch=False, native=False, scheme=None):
         with self.lock, self.verification_cache.session():
+            update_result = None
             report_progress('check', '检查运行状态与插件选择')
             self.require_stopped()
             self.require_executable()
+            if revision != digest(self.manifest()[0]):
+                raise MenuError('配置已发生变化，请刷新后重试。', code='revision_conflict')
+            if launch and not self.official_update.inside:
+                update_result = self.official_update.before_launch()
+                revision = digest(self.manifest()[0])
+                if update_result and isinstance(selection, list):
+                    selection = [name for name in selection if name not in update_result.get('suspended', {})]
+                    scheme = None  # Old version locks cannot authorize the new generation.
+            self.official_update.require_idle()
             if launch:
                 self.runtime_repair.require_ready()
             try:
@@ -460,6 +524,7 @@ class Manager:
                                 recovery='刷新实际配置，重新确认插件选择后提交。', retryable=True)
             plugins = self.discover(obj, bundles)
             self.validate_selection(selection, plugins)
+            plugins = self.active_plugins(plugins)
             self.require_executable()
             try:
                 self.tracking.check_host_identity(selection)
@@ -529,6 +594,10 @@ class Manager:
                       "changed": changed, "launched": launch,
                       "patchMode": receipt['mode'] if receipt else ('plugin' if selection else 'native'),
                       "verifiedCurrent": bool(current_verified)}
+            if update_result:
+                result['officialUpdate'] = update_result
+                if update_result.get('suspended'):
+                    result['message'] += ' · 已暂停未适配插件：' + '、'.join(update_result['suspended'])
             candidate = copy.deepcopy(self.settings)
             candidate["order"] = [p["id"] for p in plugins]
             candidate["lastSelection"] = list(selection)
@@ -684,6 +753,7 @@ class Server(ThreadingHTTPServer):
     catalog = Catalog()
 
     def __init__(self, *args, **kwargs):
+        self.install_sources = InstallSources(self.catalog)
         self.mutation_lock = threading.Lock()
         self.operations = OperationLog()
         self.stopping = threading.Event()
@@ -806,7 +876,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ping":
                 return self.reply(200, {"running": bool(running_harness())})
             if path == '/api/tracking':
-                return self.reply(200, self.server.manager.tracking.summary())
+                return self.reply(200, self.server.manager.tracking_status())
+            if path == '/api/install-sources':
+                query = parse_qs(urlparse(self.path).query)
+                return self.reply(200, self.server.install_sources.inspect(query.get('name', [''])[0],
+                    query.get('kind', ['npm'])[0], query.get('value', [''])[0]))
             if path == '/api/tracking/diff':
                 return self.reply(200, self.server.manager.tracking.export_changes())
             if path == '/api/catalog/search':
@@ -953,6 +1027,19 @@ class Handler(BaseHTTPRequestHandler):
                     result = manager.official_host.accept(body.get('token'))
                 else:
                     raise MenuError('未知官方更新验证操作。')
+            elif path.startswith('/api/official-update/'):
+                action = path.rsplit('/', 1)[-1]
+                service = manager.official_update
+                if action == 'prepare':
+                    result = service.prepare(body.get('installer'), body.get('sha512'))
+                elif action == 'execute':
+                    result = service.execute(body.get('token'))
+                elif action == 'reconcile':
+                    result = service.reconcile(body.get('installer'), body.get('sha512'))
+                elif action == 'abort':
+                    result = service.abort()
+                else:
+                    raise MenuError('未知官方版本更新操作。')
             elif path.startswith('/api/maintenance/'):
                 action = path.rsplit('/', 1)[-1]
                 service = manager.maintenance
@@ -977,7 +1064,11 @@ class Handler(BaseHTTPRequestHandler):
                 tracker = manager.tracking
                 try:
                     if action == 'begin':
-                        result = tracker.begin(body.get('name'), body.get('source', ''))
+                        if body.get('source'):
+                            self.server.install_sources.authorize(body.get('name'), body['source'], body.get('sourceToken'))
+                        elif body.get('mode') != 'record':
+                            raise MenuError('请验证安装来源，或明确选择高级手动记录。')
+                        result = manager.begin_tracking(body.get('name'), body.get('source', ''))
                     elif action == 'abandon':
                         result = tracker.abandon()
                     elif action == 'retry':
@@ -1122,6 +1213,7 @@ def serve(args, owned):
     try:
         server.token = secrets.token_urlsafe(32)
         server.manager = Manager(args.data)
+        server.manager.catalog = server.catalog
         url = f"http://127.0.0.1:{server.server_port}/?token={server.token}"
         write_json(instance_path, {"url": url, "pid": os.getpid()})
 

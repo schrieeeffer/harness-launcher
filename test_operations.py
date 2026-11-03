@@ -7,6 +7,16 @@ from operations import OperationLog, report_progress
 
 
 class OperationLogTests(unittest.TestCase):
+    def test_nested_file_counts_do_not_move_launch_back_to_package_phase(self):
+        log = OperationLog()
+        identity = log.begin('launch')
+        with log.reporting(identity):
+            report_progress('launch', '准备打开窗口')
+            report_progress(None, '复核插件文件', 3, 8)
+        progress = log.snapshot()['current']['progress']
+        self.assertEqual(progress['stage'], 'launch')
+        self.assertEqual((progress['completed'], progress['total']), (3, 8))
+
     def test_progress_is_real_work_isolated_by_operation_and_thread(self):
         log = OperationLog()
         first = log.begin('launch')

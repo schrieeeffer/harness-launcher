@@ -31,6 +31,9 @@ class ManagerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name).resolve()
+        environment = patch.dict(os.environ, LOCALAPPDATA=str(root / 'local-app-data'))
+        environment.start()
+        self.addCleanup(environment.stop)
         self.home = root / 'home'
         self.profile = self.home / 'profiles' / 'desktop'
         self.profile.mkdir(parents=True)

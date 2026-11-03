@@ -20,10 +20,11 @@ from adapters import PURGE, is_adapter
 from domain import PLUGIN_NAME
 from errors import LauncherError
 from maintenance_files import CheckpointFiles
-from operations import report_progress
+from operations import report_progress, progress_workflow
 from patch_modes import file_hash, sha
 from storage import atomic_write, canonical, write_json
 from update_check import UpdateCheck
+from installer_policy import build_notice, install_arguments, failure_hint, protect_other_builds
 
 
 FEATURE = 'maintenance-transaction'
@@ -69,6 +70,7 @@ class Maintenance:
             self.local.inside = previous
 
     def require_idle(self):
+        self.manager.official_update.require_idle()
         if not getattr(self.local, 'inside', False) and self.path.exists():
             raise LauncherError('插件维护尚未完成，请在“更新与卸载”中完成验证或恢复检查点。',
                                 code='maintenance_pending')
@@ -89,11 +91,13 @@ class Maintenance:
         return roots
 
     def files(self):
-        return CheckpointFiles(self.roots(), self.tracker.store)
+        return CheckpointFiles(self.roots(), self.tracker.store,
+                               link_targets=(self.tracker.core.resources / 'runtime',))
 
     def capture(self):
         report_progress('files', '保存维护检查点（首次检查可能较慢）')
-        return self.tracker.store.object('transactions', {'files': self.files().snapshot()})
+        return self.tracker.store.object('transactions', {'files': self.files().snapshot(progress=lambda count, total:
+            report_progress('files', '保存维护检查点', count, total))})
 
     def snapshot(self, reference):
         return self.tracker.store.read_object(reference)['files']
@@ -130,11 +134,12 @@ class Maintenance:
             if plugin is None or not plugin['available']:
                 raise LauncherError('插件缺失或已卸载，请刷新。')
             records = self.tracker.load()['records']
+            suspended = self.tracker.load().get('suspendedPackages', {})
             reasons = []
-            if name not in records and not is_adapter(name):
+            if name not in records and not is_adapter(name) and name not in suspended:
                 reasons.append('此插件没有安装前记录，无法确认和还原其文件修改。')
             for p in plugins:
-                if p['id'] not in records and not is_adapter(p['id']):
+                if p['id'] not in records and not is_adapter(p['id']) and p['id'] not in suspended:
                     reasons.append('存在未记录插件：' + p['id'])
                 if p['id'] == name:
                     continue
@@ -152,7 +157,7 @@ class Maintenance:
             if name in records:
                 changes = [{'path': item['key'], 'action': '还原原始文件' if item['before'] else '移除记录内新增文件'}
                            for item in self.tracker.read_object(records[name]['delta'])['changes']]
-            elif self.tracker.core.load():
+            elif is_adapter(name) and self.tracker.core.load():
                 changes = [{'path': str(item['path']), 'action': '恢复原生内容；存在外部改动则停止'}
                            for item in self.tracker.core.load()['files']]
             payload = {'name': name, 'action': action, 'target': target, 'revision': sha(raw),
@@ -163,8 +168,12 @@ class Maintenance:
                     'files': changes, 'externalSource': external,
                     'preserved': ['账号、会话、附件和工作区', '其他插件仍需的共享依赖', '外部本地插件源目录（只移除或恢复链接）',
                         '归属不明及后来修改的文件（检测到冲突会停止）', '恢复检查点与保存的启动方案'],
-                    'message': '先退出 Harness。维护会暂时关闭插件；升级需完成一次运行并退出，验证成功才登记新版。' +
-                        (' 安装来源将保存为：' + str(target) if action == 'upgrade' else '')}
+                    'message': ('先退出 Harness。确认卸载后会保存恢复检查点、还原此插件已记录的补丁，并移除插件包及其加载配置。'
+                                if action == 'uninstall' else
+                                '先退出 Harness。维护会暂时关闭插件；升级需完成一次运行并退出，验证成功才登记新版。') +
+                        (' 安装来源将保存为：' + str(target) +
+                         ' 目标宿主版本未声明或不同，不代表已确认不兼容；将先保留检查点，再安装并验证当前宿主上的新记录。旧宿主补丁不会重放。'
+                         + build_notice(name, target) if action == 'upgrade' else '')}
 
     def _pins(self, name):
         _, obj, bundles = self.manager.manifest()
@@ -182,13 +191,17 @@ class Maintenance:
     def verify_target(self, name):
         # Maintenance removes code and parked patches even for disabled plugins.
         # Unlike a native launch, it must verify those dormant bytes too.
-        if is_adapter(name):
+        registry = self.tracker.load()
+        suspended = registry.get('suspendedPackages', {}).get(name)
+        if suspended:
+            self.tracker.versions.verify_package(name, suspended)
+        elif is_adapter(name):
             state = self.tracker.core.load()
             if state:
                 self.tracker.versions.verify_adapter(state, name, installed=True)
                 self.tracker.core.verify_files(state)
         else:
-            record = self.tracker.load()['records'][name]
+            record = registry['records'][name]
             self.tracker.versions.verify_package(name, record['package'])
 
     def package_command(self, action, source, operation_id):
@@ -199,9 +212,10 @@ class Maintenance:
         env.update(ELECTRON_RUN_AS_NODE='1', DSH_HOME=str(self.manager.home), DSH_SURFACE='desktop',
                    DSH_DESKTOP_INSTALL=str(core.resources.parent))
         log = self.folder / (operation_id + '.log')
-        with log.open('wb') as output:
+        with protect_other_builds(self.manager, self.load()['name'], env), log.open('wb') as output:
+            args = install_arguments(self.load()['name'], source) if action == 'add' else [action, source]
             process = subprocess.Popen([self.manager.settings['executable'], '--expose-internals', str(entry),
-                'plugin', '--profile', 'desktop', action, source], cwd=self.manager.profile, env=env,
+                'plugin', '--profile', 'desktop', *args], cwd=self.manager.profile, env=env,
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             try:
@@ -221,7 +235,7 @@ class Maintenance:
                 raise LauncherError('包管理器超过 10 分钟，已结束本次安装进程并保留恢复点。',
                                     code='installer_failed') from exc
         if code:
-            raise LauncherError(f'官方包管理器返回 {code}，检查点已保留。日志：{log}', code='installer_failed')
+            raise LauncherError(f'官方包管理器返回 {code}，检查点已保留。{failure_hint(log)}日志：{log}', code='installer_failed')
 
     def _clear_adapter(self):
         core = self.tracker.core
@@ -233,8 +247,27 @@ class Maintenance:
         files.restore({}, snapshot)
         core.record.unlink(missing_ok=True)
 
+    def _detach_external_package_link(self, pending):
+        """Allow an explicit source change without pnpm replacing a junction.
+
+        Only the checkpointed leaf link is removed. The external tree remains
+        immutable and is verified again before launch and rollback.
+        """
+        if pending['action'] != 'upgrade' or not pending.get('externalSource'):
+            return
+        self.tracker.versions.verify_external_source(pending['name'], pending['externalSource']['package'],
+                                                    pending['externalSource']['path'])
+        key = 'modules|' + pending['name']
+        entry = self.snapshot(pending['before']).get(key)
+        if not entry or entry.get('type') != 'link' or not entry.get('external'):
+            raise LauncherError('外部安装来源不是已记录的目录链接，不能自动替换。')
+        # restore rechecks identity and ancestors immediately before unlinking;
+        # a changed link or real directory is never followed or removed.
+        self.files().restore({}, {key: entry}, lambda: self.check_host(pending))
+
     def start(self, name, action, token, target=None):
-        with self.manager.lock, self.manager.verification_cache.session():
+        with self.manager.lock, self.manager.verification_cache.session(), progress_workflow() as phase:
+            phase('check', '检查维护条件与目标来源')
             self.manager.require_stopped()
             preview = self.preview(name, action, target)
             if token != preview['token']:
@@ -244,19 +277,17 @@ class Maintenance:
             self.tracker.guard(check_files=True)
             self.verify_target(name)
             update, meta = (UpdateCheck(self.manager).target(name, target) if action == 'upgrade' else (None, None))
-            if is_adapter(name) and meta:
-                # Purge uses host-file patches. A declared, exact target is
-                # mandatory; new host lines need a new verified adapter.
-                from patch_modes import archive_info
-                host_version = archive_info(self.tracker.core.official_archive(),
-                                           self.tracker.core.resources / 'app.asar.unpacked')['version']
-                if meta.get('dshTarget') != host_version:
-                    raise LauncherError('此 purge 版本未声明适配当前 Harness；保留旧版，等待适配。')
+            # dshTarget is an author's tested target, not proof of runtime
+            # incompatibility. Install against the current native host, then
+            # require a fresh, observed run and verified reversible record.
+            # In particular, never replay a suspended old-generation patch.
+            phase('packages', '保存维护前检查点与共享依赖')
+            pins, checkpoint = self._pins(name), self.capture()
             _, obj, bundles = self.manager.manifest()
             pending = {'format': 1, 'id': uuid.uuid4().hex, 'phase': 'prepared', 'name': name, 'action': action,
                        'version': preview['version'], 'target': target, 'at': time.time(), 'host': self.host(),
-                       'selection': [x for x in bundles if x not in OFFICIAL], 'pins': self._pins(name),
-                       'before': self.capture(), 'expected': None, 'error': None}
+                       'selection': [x for x in bundles if x not in OFFICIAL], 'pins': pins,
+                       'before': checkpoint, 'expected': None, 'error': None}
             original_root = (self.manager.profile / 'node_modules' / name).resolve()
             if not original_root.is_relative_to(self.manager.profile / 'node_modules'):
                 pending['externalSource'] = {'path': str(original_root),
@@ -273,6 +304,7 @@ class Maintenance:
                     value = self.tracker.load()
                     value['requiredFeatures'] = [FEATURE]
                     self.tracker.save(value)
+                    phase('files', '还原当前补丁并建立安装基线')
                     self.manager.apply([], self.manager.state()['revision'])
                     # All host layers are native before replacing any code.
                     pending['baseline'] = self.tracker.object('snapshots', self.tracker.snapshot())
@@ -285,8 +317,10 @@ class Maintenance:
                     self.tracker.save(value)
                     pending['phase'] = 'installing'
                     self.save(pending)
-                    report_progress('sync', '正在升级插件' if action == 'upgrade' else '正在卸载插件')
+                    phase('sync', '正在升级插件' if action == 'upgrade' else '正在卸载插件')
+                    self._detach_external_package_link(pending)
                     self.package_command('add' if action == 'upgrade' else 'remove', target or name, pending['id'])
+                    phase('launch', '校验安装结果与共享依赖')
                     self.manager.require_stopped()
                     self.check_host(pending)
                     self.verify_pins(pending)
@@ -296,6 +330,8 @@ class Maintenance:
                             raise LauncherError('包管理器没有完整移除目标包，保留检查点。')
                         value = self.tracker.load()
                         value['records'].pop(name, None)
+                        value.get('suspended', {}).pop(name, None)
+                        value.get('suspendedPackages', {}).pop(name, None)
                         value['order'] = [x for x in value['order'] if x != name]
                         value['requiredFeatures'] = []
                         value['currentCombination'] = None
@@ -313,12 +349,13 @@ class Maintenance:
                     pending['package'] = self.tracker.versions.package_snapshot(name, target)
                     manifest['dsh']['profile']['bundles'] = [*OFFICIAL, name]
                     atomic_write(self.manager.manifest_path, (json.dumps(manifest, ensure_ascii=False, indent=2) + '\n').encode())
+                    phase('launch', '保存安装结果，准备首次运行')
                     pending['expected'] = self.capture()
                     pending['phase'] = 'waiting'
                     pending['observed'] = False
                     self.save(pending)
                     self._launch(pending)
-                    return {'message': '新版已安装，正在首次运行。正常使用并退出 Harness 后，在此完成验证；purge 请先应用补丁。'}
+                    return {'message': '安装已完成，尚未确认兼容。正常使用并退出 Harness 后，在此完成验证；修改宿主的插件需先应用其新版补丁。失败时保留检查点供恢复。'}
             except Exception as exc:
                 pending['phase'], pending['error'] = 'failed', str(exc)
                 # Do not snapshot while a timed-out installer is still writing.
@@ -355,49 +392,69 @@ class Maintenance:
             self.save(pending)
 
     def finish(self):
-        with self.manager.lock, self.manager.verification_cache.session(), self.internal():
+        with self.manager.lock, self.manager.verification_cache.session(), self.internal(), progress_workflow() as phase:
+            phase('check', '检查首次运行是否结束')
             self.manager.require_stopped()
             pending = self.load()
             if not pending or pending['phase'] != 'waiting' or not pending.get('observed'):
                 raise LauncherError('尚未观察到新版的完整运行，请正常使用并退出后验证。')
             self.check_host(pending)
+            phase('packages', '校验插件版本与共享依赖')
             self.verify_pins(pending)
             name = pending['name']
             self.tracker.versions.verify_package(name, pending['package'])
             try:
+                phase('files', '校验当前宿主上的新补丁与可回滚记录')
                 raw, obj, bundles = self.manager.manifest()
                 if bundles != [*OFFICIAL, name]:
                     raise LauncherError('首次运行时组合被改变，不能把其他改动记到此插件。')
                 value = self.tracker.load()
+                before = self.tracker.read_object(pending['baseline'])
                 if is_adapter(name):
+                    from file_view import FileView
+                    # The adapter parks its whole extracted tree. Inspect it
+                    # once here; only ordinary deltas need new rollback blobs.
+                    view = FileView([*self.tracker.scopes.values(), *self.tracker.core.extra_roots()],
+                                    verification_cache=self.manager.verification_cache)
+                    after = view.snapshot(self.tracker.scopes,
+                        progress=lambda done, total: report_progress('files', '校验首次运行文件', done, total))
+                    changes = self.tracker.differences(before, after)
                     plugins = self.manager.discover(obj, bundles)
-                    self.tracker.core.capture(plugins)
+                    changes = self.tracker.capture_adapter(plugins, before, changes, view=view)
                 else:
-                    before = self.tracker.read_object(pending['baseline'])
                     after = self.tracker.snapshot()
                     changes = self.tracker.differences(before, after)
+                # An archive adapter can also write ordinary managed files
+                # (for example profile YAML). Record those with the same delta
+                # engine as every other plugin, without duplicating its app tree.
+                if changes or not is_adapter(name) or name in value['records']:
                     self.tracker.operations(changes)
                     self.tracker.operations(changes, False)
-                    previous = value['records'][name]
-                    history = copy.deepcopy(previous.get('history', []))
-                    history.append({k: copy.deepcopy(v) for k, v in previous.items() if k not in ('history', 'enabled')})
+                    previous = value['records'].get(name)
+                    history = copy.deepcopy(previous.get('history', [])) if previous else []
+                    if previous:
+                        history.append({k: copy.deepcopy(v) for k, v in previous.items() if k not in ('history', 'enabled')})
                     record = {'version': pending['newVersion'], 'delta': self.tracker.object('deltas', {'changes': changes}),
                         'count': len(changes), 'enabled': True, 'baseSelection': [], 'baseVersions': {},
                         'history': history, 'hostHash': pending['host']['exe'], 'source': pending['target'],
                         'baseline': pending['baseline'], 'after': self.tracker.object('snapshots', after),
                         'manifestBefore': pending['manifestBefore'], 'package': pending['package']}
                     record['revision'] = self.tracker.versions.revision(name, record, record['package'],
-                        record['source'], previous['revision'])
+                        record['source'], previous['revision'] if previous else None)
                     value['records'][name] = record
                     value['order'] = [n for n in value['order'] if n != name] + [name]
                 self.check_host(pending)
                 self.verify_pins(pending)
+                value.get('suspended', {}).pop(name, None)
+                value.get('suspendedPackages', {}).pop(name, None)
                 value['requiredFeatures'] = []
                 value['currentCombination'] = None
                 value['inventory'] = self.tracker.object('snapshots', self.tracker.metadata())
                 self.tracker.save(value)
                 # Restore the previous enabled selection, with the new revision.
+                phase('sync', '恢复原启用组合')
                 self.manager.apply(pending['selection'], sha(raw))
+                phase('launch', '保存最终校验与恢复点')
                 pending['expected'] = self.capture()
                 self._complete(pending)
                 return {'message': '升级验证完成，原启用组合已恢复；可从恢复点回到升级前。'}
@@ -432,18 +489,21 @@ class Maintenance:
         if pending.get('externalSource'):
             self.tracker.versions.verify_external_source(pending['name'], pending['externalSource']['package'],
                                                         pending['externalSource']['path'])
-        current = self.files().snapshot(store=False)
+        files = self.files()
+        report_progress('files', '核对恢复检查点与当前文件')
+        current = files.snapshot(store=False, progress=lambda done, total:
+            report_progress('files', '核对恢复检查点与当前文件', done, total))
         expected, before = self.snapshot(pending['expected']), self.snapshot(pending['before'])
-        changed = self.files().changes(expected, current)
+        changed = files.changes(expected, current)
         # During first run new plugin writes are unsealed. Finish validation
         # before rollback instead of absorbing arbitrary external user edits.
         if pending['phase'] == 'restoring':
             changed = [key for key in set(current) | set(expected) | set(before)
-                       if self.files().identity(current.get(key)) not in
-                       (self.files().identity(expected.get(key)), self.files().identity(before.get(key)))]
+                       if files.identity(current.get(key)) not in
+                       (files.identity(expected.get(key)), files.identity(before.get(key)))]
         if changed:
             raise LauncherError('恢复点之后存在未验证的新改动，已停止覆盖：' + '、'.join(changed[:5]), code='maintenance_conflict')
-        keys = self.files().changes(current, before)
+        keys = files.changes(current, before)
         token = hashlib.sha256(canonical({'id': pending['id'], 'current': current})).hexdigest()
         return pending, {'token': token, 'id': pending['id'], 'count': len(keys), 'files': keys,
                          'message': '恢复此维护之前的插件代码、配置与已记录补丁；用户会话和工作区保持原样。'}
@@ -457,18 +517,21 @@ class Maintenance:
             self.save(pending)
             self.check_host(pending)
             before, expected = self.snapshot(pending['before']), self.snapshot(pending['expected'])
+            files = self.files()
             archives = [key for key in set(before) | set(expected)
-                        if self.files().path(key, leaf_link=True).name in ('app.asar', 'app.asar.bak', 'official.asar')]
+                        if files.path(key, leaf_link=True).name in ('app.asar', 'app.asar.bak', 'official.asar')]
             def guard():
                 if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != pending['host']['exe']:
                     raise LauncherError('恢复期间宿主被更新，已停止。', code='host_identity_changed')
                 for key in archives:
-                    path = self.files().path(key)
+                    path = files.path(key)
                     actual = self.tracker.versions.hash(path)
                     allowed = {None, (before.get(key) or {}).get('hash'), (expected.get(key) or {}).get('hash')}
                     if actual not in allowed:
                         raise LauncherError('恢复期间官方归档被更新，已停止。', code='host_identity_changed')
-            self.files().restore(before, expected, guard)
+            report_progress('sync', '恢复已核验的插件与配置文件')
+            files.restore(before, expected, guard)
+            report_progress('launch', '核对宿主并保存恢复结果')
             self.check_host(pending)
             self.manager.settings = json.loads(self.manager.settings_file.read_bytes())
             self._complete(pending, restored=True)

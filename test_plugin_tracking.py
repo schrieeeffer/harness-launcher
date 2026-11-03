@@ -395,7 +395,7 @@ class GenericTrackingTests(unittest.TestCase):
     def test_source_is_passed_as_one_argument_to_official_cli(self):
         tracker = self.manager.tracking
         self.install_fixture('plugin-a')
-        with patch('plugin_tracking.subprocess.Popen') as popen:
+        with patch('plugin_tracking.subprocess.Popen') as popen, patch('plugin_tracking.protect_other_builds') as isolate:
             popen.return_value.wait.return_value = 0
             tracker.install('plugin-a', 'D:/plugins/a & b', '0' * 32)
             args, kwargs = popen.call_args
@@ -403,6 +403,7 @@ class GenericTrackingTests(unittest.TestCase):
             self.assertIn('--profile', args[0])
             self.assertEqual(kwargs['env']['DSH_HOME'], str(self.home))
             self.assertNotIn('shell', kwargs)
+            isolate.assert_called_once_with(self.manager, 'plugin-a', kwargs['env'])
 
     def test_generic_records_survive_restart(self):
         self.begin()
@@ -749,7 +750,15 @@ class GenericTrackingTests(unittest.TestCase):
                                              data=data, headers=headers)
             with opener.open(request, timeout=20) as response:
                 return json.load(response)
-        api('tracking/begin', {'name': 'plugin-a', 'source': ''})
+        for body in [{'name': 'plugin-a', 'source': 'plugin-a@1.0.0'},
+                     {'name': 'plugin-a', 'source': 'plugin-a@1.0.0', 'sourceToken': 'forged'},
+                     {'name': 'plugin-a', 'source': ''}]:
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                api('tracking/begin', body)
+            self.assertEqual(failure.exception.code, 400)
+            self.assertIsNone(self.manager.tracking.summary()['session'])
+            self.popen.assert_not_called()
+        api('tracking/begin', {'name': 'plugin-a', 'source': '', 'mode': 'record'})
         self.wait_job()
         self.install_fixture('plugin-a')
         (self.app / 'main.js').write_bytes(b'generic HTTP-recorded patch')
@@ -761,6 +770,24 @@ class GenericTrackingTests(unittest.TestCase):
         self.assertIn('plugin-a', state['tracking']['records'])
         api('apply', {'selection': [], 'revision': state['revision'], 'native': True})
         self.assertTrue(api('state')['patchMode']['verifiedNative'])
+
+    def test_status_remains_readable_during_file_verification(self):
+        tracker = self.manager.tracking
+        ready, release = threading.Event(), threading.Event()
+        def worker():
+            with self.manager.lock:
+                ready.set()
+                release.wait(5)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.assertTrue(ready.wait(2))
+        try:
+            started = time.monotonic()
+            status = self.manager.tracking_status()
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(status, tracker.summary())
+        finally:
+            release.set(); thread.join(2)
 
 
 if __name__ == '__main__':

@@ -22,6 +22,7 @@ class Element {
   close() { this.open = false; this.events.close?.(); }
   focus() {}
 }
+const sourceProof = (source='dsh-pet@0.3.8') => ({enabled:true,source,token:'source-proof',expiresAt:Date.now()/1000+300,reason:'verified'});
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => structuredClone(data)});
 async function app() {
   const nodes = new Map([...fs.readFileSync('ui/index.html', 'utf8').matchAll(/\bid="([^"]+)"/g)].map(m => [m[1], new Element()]));
@@ -48,6 +49,86 @@ async function app() {
   return fixture;
 }
 
+test('unverified sources remain blocked across state refresh and cannot submit', async () => {
+  const ui = await app(); ui.nodes.get('trackingName').value = 'dsh-pet';
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('trackingBegin').disabled, true);
+  await ui.nodes.get('trackingForm').onsubmit({preventDefault(){}});
+  assert.equal(ui.calls.some(c=>c.url==='/api/tracking/begin'), false);
+});
+
+test('restarted recording keeps saved snapshot visible without reporting a false zero backup', async () => {
+  const ui = await app();
+  ui.tracking.session = {id:'session-fixture',plugin:'example-plugin',phase:'installing',runState:'idle',baseline:'snapshots/saved.json',error:'reader conflict'};
+  await ui.run('refresh()');
+  assert.match(ui.nodes.get('trackingCounter').textContent,/快照已保存/);
+  assert.doesNotMatch(ui.nodes.get('trackingCounter').textContent,/0 个文件/);
+  ui.tracking.session.phase = 'verifying'; ui.tracking.session.count = 0;
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('trackingCounter').textContent,'检测到 0 项改动');
+});
+
+test('plugins suspended after host update are not mislabeled as never recorded', async () => {
+  const ui=await app();
+  ui.state.plugins[0].tracking='untracked'; ui.state.plugins[0].suspended='缺少新版兼容声明';
+  ui.state.patchMode={unknown:['plugin-a']};
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('untrackedCount').textContent,'0');
+  assert.equal(ui.nodes.get('suspendedGroup').hidden,false);
+  assert.match(ui.nodes.get('suspendedRecords').textContent,/缺少新版兼容声明/);
+  assert.doesNotMatch(ui.nodes.get('plugins').textContent,/未记录安装前状态/);
+  assert.match(ui.nodes.get('patchDescription').textContent,/重新验证当前版本/);
+  assert.doesNotMatch(ui.nodes.get('patchDescription').textContent,/已暂停组合切换/);
+});
+
+test('verified npm installs the pinned source and edited version immediately invalidates it', async () => {
+  const ui = await app(), online = ui.respond;
+  ui.nodes.get('trackingName').value = 'dsh-pet';
+  ui.respond = (p,o) => p.startsWith('install-sources?') ? response(sourceProof()) : online(p,o);
+  await ui.run("verifySource('npm')");
+  assert.equal(ui.nodes.get('trackingBegin').disabled, false);
+  await ui.nodes.get('trackingForm').onsubmit({preventDefault(){}});
+  const body = JSON.parse(ui.calls.find(c=>c.url==='/api/tracking/begin').body);
+  assert.equal(body.source, 'dsh-pet@0.3.8'); assert.equal(body.sourceToken, 'source-proof');
+  ui.nodes.get('trackingSource').value='0.3.9'; ui.nodes.get('trackingSource').oninput();
+  assert.equal(ui.nodes.get('trackingBegin').disabled,true);
+  assert.equal(ui.run('sourceReady()'),false);
+});
+
+test('late source results do not enable a different plugin and failures are retryable', async () => {
+  const ui = await app(); let finish;
+  ui.nodes.get('trackingName').value='dsh-pet';
+  ui.respond = () => new Promise(resolve=>{finish=()=>resolve(response(sourceProof()));});
+  const pending=ui.run("verifySource('npm')");
+  ui.nodes.get('trackingName').value='another'; ui.nodes.get('trackingName').oninput();
+  finish(); await pending;
+  assert.equal(ui.run('sourceReady()'),false);
+  ui.respond=()=>response({error:'missing build'},400);
+  await ui.run("verifySource('git')");
+  assert.equal(ui.nodes.get('verifyGitSource').disabled,false);
+  assert.match(ui.nodes.get('otherSourceFeedback').textContent,/missing build/);
+  assert.equal(ui.run('sourceReady()'),false);
+});
+
+test('source lookup network failure does not freeze the launcher connection', async () => {
+  const ui=await app(); ui.nodes.get('trackingName').value='dsh-pet';
+  ui.respond=()=>{throw new TypeError('offline registry');};
+  await ui.run("verifySource('npm')");
+  assert.equal(ui.run('model.connection.status'),'online');
+  assert.equal(ui.nodes.get('verifyNpmSource').disabled,false);
+  assert.equal(ui.nodes.get('trackingBegin').disabled,true);
+});
+
+test('expired source is blocked and advanced recording must be explicitly chosen', async () => {
+  const ui=await app(); ui.nodes.get('trackingName').value='dsh-pet';
+  ui.run("selectedSource='npm'; sourceProofs.npm={enabled:true,key:sourceKey('npm'),expiresAt:1}; renderTracking()");
+  assert.equal(ui.nodes.get('trackingBegin').disabled,true);
+  ui.nodes.get('manualRecordMode').checked=true; ui.nodes.get('manualRecordMode').onchange();
+  await ui.nodes.get('trackingForm').onsubmit({preventDefault(){}});
+  const body=JSON.parse(ui.calls.find(c=>c.url==='/api/tracking/begin').body);
+  assert.equal(body.source,''); assert.equal(body.mode,'record');
+});
+
 test('turning all plugins off stays a draft and does not disconnect or start anything', async () => {
   const ui = await app(); const requests = ui.calls.length;
   ui.nodes.get('selectNone').onclick();
@@ -67,7 +148,7 @@ test('pending maintenance blocks launch without blocking access to recovery', as
   assert.equal(ui.nodes.get('launch').disabled, true);
   await ui.nodes.get('maintenanceButton').onclick();
   assert.equal(ui.nodes.get('maintenanceDialog').open, true);
-  assert.match(ui.nodes.get('maintenancePending').textContent, /预览恢复/);
+  assert.match(ui.nodes.get('maintenancePending').textContent, /恢复到维护前/);
 });
 
 test('maintenance preview is read-only and execution uses the reviewed exact token', async () => {
@@ -77,6 +158,13 @@ test('maintenance preview is read-only and execution uses the reviewed exact tok
     : path === 'maintenance' ? response({pending:null,history:[]}) : online(path);
   await ui.run("previewPlugin('plugin-a', 'uninstall')");
   assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/execute'), false);
+  assert.equal(ui.nodes.get('maintenanceConfirm').textContent, '确认卸载');
+  assert.match(ui.nodes.get('maintenancePreviewNotice').textContent, /尚未卸载/);
+  assert.equal(ui.nodes.get('maintenanceFileDetails').open, false);
+  assert.match(ui.nodes.get('maintenanceFilesLabel').textContent, /插件额外修改的文件（0 项）/);
+  ui.nodes.get('maintenancePreview').close();
+  assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/execute'), false);
+  await ui.run("previewPlugin('plugin-a', 'uninstall')");
   await ui.nodes.get('maintenanceConfirm').onclick();
   const writes = ui.calls.filter(c=>c.url==='/api/maintenance/execute');
   assert.equal(writes.length, 1);
@@ -88,6 +176,102 @@ test('a blocked maintenance preview cannot be confirmed in the UI', async () => 
   ui.run("showMaintenancePreview('Preview', {message:'conflict',blocked:['shared dependency'],files:[]}, ()=>{})");
   assert.equal(ui.nodes.get('maintenanceConfirm').disabled, true);
   assert.match(ui.nodes.get('maintenanceBlocked').textContent, /shared dependency/);
+  await ui.nodes.get('maintenanceConfirm').onclick();
+  assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/execute'), false);
+});
+
+test('maintenance cleanup with no candidates never enables a deletion', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = path => path === 'maintenance/gc-preview' ? response({token:'empty',count:0,bytes:0,files:[]}) : online(path);
+  await ui.nodes.get('previewCleanup').onclick();
+  assert.equal(ui.nodes.get('maintenanceConfirm').textContent, '确认清理缓存');
+  assert.equal(ui.nodes.get('maintenanceConfirm').disabled, true);
+  assert.match(ui.nodes.get('maintenancePreviewNotice').textContent, /没有可清理/);
+  await ui.nodes.get('maintenanceConfirm').onclick();
+  assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/gc'), false);
+});
+
+test('maintenance confirmation uses the current action after switching review dialogs', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = path => path === 'maintenance/preview' ? response({token:'upgrade',files:[],blocked:[],message:'update'})
+    : path === 'maintenance/gc-preview' ? response({token:'cleanup',count:2,bytes:2097152,files:[{store:'tracking',path:'blobs/a'},{store:'tracking',path:'blobs/b'}]})
+    : path === 'maintenance' ? response({pending:null,history:[]}) : online(path);
+  await ui.run("previewPlugin('plugin-a', 'upgrade', 'plugin-a@2')");
+  assert.equal(ui.nodes.get('maintenanceConfirm').textContent, '确认更新');
+  ui.nodes.get('maintenancePreview').close();
+  await ui.run("previewPlugin('plugin-a', 'upgrade', 'plugin-a@1', true)");
+  assert.equal(ui.nodes.get('maintenanceConfirm').textContent, '确认重新验证');
+  ui.nodes.get('maintenancePreview').close();
+  await ui.nodes.get('previewCleanup').onclick();
+  assert.match(ui.nodes.get('maintenancePreviewNotice').textContent, /尚未清理.*2 项缓存.*2.0 MB/);
+  assert.equal(ui.nodes.get('maintenanceFileDetails').open, false);
+  assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/gc'), false);
+  await ui.nodes.get('maintenanceConfirm').onclick();
+  assert.equal(ui.calls.some(c=>c.url==='/api/maintenance/execute'), false);
+  const writes = ui.calls.filter(c=>c.url==='/api/maintenance/gc');
+  assert.equal(writes.length, 1);
+  assert.deepEqual(JSON.parse(writes[0].body), {token:'cleanup'});
+});
+
+test('maintenance shows live phase counts while the write is pending and clears afterward', async () => {
+  const ui = await app(); const online = ui.respond; let finish;
+  ui.nodes.get('maintenanceDialog').showModal();
+  ui.respond = (path, options) => path === 'operations' ? response({current: {kind:'maintenance/execute', durationMs:42000,
+    progress:{step:2,steps:5,label:'保存检查点',completed:123,total:null,unit:'files'}}})
+    : path === 'maintenance/execute' ? new Promise(resolve => {finish = () => resolve(response({message:'complete'}));}) : online(path);
+  const pending = ui.run("act(() => api('maintenance/execute', {}, 0))");
+  assert.equal(ui.nodes.get('maintenanceProgress').hidden, false);
+  await [...ui.timers.values()].find(timer => timer.delay === 2000).fn();
+  assert.equal(ui.nodes.get('maintenanceLabel').textContent, '保存检查点');
+  assert.match(ui.nodes.get('maintenanceDetail').textContent, /123.*总量待确认/);
+  assert.equal(ui.nodes.get('maintenanceTrack')['aria-valuenow'], '1');
+  assert.equal(ui.nodes.get('maintenanceElapsed').textContent, '42 秒');
+  assert.equal(ui.nodes.get('maintenanceHint').hidden, false);
+  finish(); await pending;
+  assert.equal(ui.nodes.get('maintenanceProgress').hidden, true);
+  assert.equal(ui.calls.filter(c => c.url === '/api/maintenance/execute').length, 1);
+});
+
+test('maintenance first run remains visibly unfinished and same-version suspended plugins have recovery action', async () => {
+  const ui = await app();
+  ui.state.plugins[0].suspended = '需要当前宿主验证';
+  await ui.run('refresh()');
+  ui.run("maintenanceUI.updates = [{name:'plugin-a',installed:'1',status:'revalidate',latest:'1',target:'plugin-a@1'}]; renderMaintenance()");
+  assert.match(ui.nodes.get('maintenanceList').textContent, /重新验证当前版本/);
+  ui.run("maintenanceUI.status = {pending:{name:'plugin-a',phase:'waiting'},history:[]}; renderMaintenance()");
+  assert.equal(ui.nodes.get('maintenanceProgress').hidden, false);
+  assert.equal(ui.nodes.get('maintenanceLabel').textContent, '等待首次运行与退出验证');
+  assert.match(ui.nodes.get('maintenanceTrack')['aria-valuetext'], /尚未完成验证/);
+  const actions = ui.nodes.get('maintenanceList').children[0].children.find(c => c.children.some(b => b.textContent === '重新验证当前版本…'));
+  assert.ok(actions.children[0].disabled);
+});
+
+test('maintenance discards outdated update actions after install or revalidation', async () => {
+  const ui = await app();
+  ui.run("maintenanceUI.updates = [{name:'plugin-a',installed:'1',status:'available',latest:'2',target:'plugin-a@2'}]; renderMaintenance()");
+  assert.match(ui.nodes.get('maintenanceList').textContent, /更新到 2/);
+  ui.state.plugins[0].version = '2';
+  await ui.run('refresh()'); ui.run('renderMaintenance()');
+  assert.doesNotMatch(ui.nodes.get('maintenanceList').textContent, /更新到 2/);
+  assert.match(ui.nodes.get('maintenanceList').textContent, /安装状态已变化/);
+  ui.state.plugins[0].suspended = 'needs validation';
+  await ui.run('refresh()');
+  ui.run("maintenanceUI.updates = [{name:'plugin-a',installed:'2',status:'revalidate',latest:'2',target:'plugin-a@2'}]; renderMaintenance()");
+  assert.match(ui.nodes.get('maintenanceList').textContent, /重新验证当前版本/);
+  ui.state.plugins[0].suspended = '';
+  await ui.run('refresh()'); ui.run('renderMaintenance()');
+  assert.doesNotMatch(ui.nodes.get('maintenanceList').textContent, /重新验证当前版本/);
+});
+
+test('failed maintenance refreshes the persisted recovery state without retrying installation', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.state.maintenance = {pending:{name:'plugin-a',phase:'failed',error:'fixture conflict'},history:[]};
+  ui.respond = path => path === 'maintenance/execute' ? response({error:'fixture conflict'},400)
+    : path === 'maintenance' ? response(ui.state.maintenance) : online(path);
+  ui.run("showMaintenancePreview('upgrade', {files:[]}, () => api('maintenance/execute', {}, 0))");
+  await ui.nodes.get('maintenanceConfirm').onclick();
+  assert.match(ui.nodes.get('maintenancePending').textContent, /fixture conflict.*恢复到维护前/);
+  assert.equal(ui.calls.filter(c => c.url === '/api/maintenance/execute').length, 1);
 });
 
 test('offline state survives selection changes; reconnect reads actual state and keeps the draft', async () => {
@@ -512,7 +696,7 @@ test('changed official host warns and blocks launch before a request is sent', a
   assert.equal(ui.nodes.get('settingsDialog').open, true);
 });
 
-test('new official approval enables only native launch, never old plugins or recording', async () => {
+test('native-only approval without official cache keeps recording blocked with an explanation', async () => {
   const ui = await app();
   ui.state.enabled = [];
   ui.state.hostHealth = {status:'native_ready', message:'native approved'};
@@ -520,9 +704,56 @@ test('new official approval enables only native launch, never old plugins or rec
   ui.nodes.get('selectNone').onclick();
   assert.equal(ui.nodes.get('launch').disabled, false);
   assert.equal(ui.nodes.get('trackingBegin').disabled, true);
+  assert.match(ui.nodes.get('trackingGate').textContent, /验证并接续新版基线/);
+  assert.equal(ui.nodes.get('trackingSettings').hidden, false);
   ui.nodes.get('selectAll').onclick();
   assert.equal(ui.nodes.get('launch').disabled, true);
   assert.equal(ui.nodes.get('apply').disabled, true);
+});
+
+test('native-only approval with a verified-cache path offers baseline preparation before installation', async () => {
+  const ui = await app();
+  ui.state.enabled = [];
+  ui.state.hostHealth = {status:'native_ready', message:'native approved'};
+  ui.state.officialUpdate = {pending:null, autoAvailable:true};
+  ui.nodes.get('trackingName').value = 'plugin-a';
+  ui.run("selectedSource = 'npm'; sourceProofs.npm = {enabled:true, key:sourceKey('npm'), expiresAt:Date.now()/1000+300, source:'plugin-a@1.0.0', reason:'verified', token:'proof'}");
+  await ui.run('refresh(true)');
+  assert.equal(ui.nodes.get('trackingBegin').disabled, false);
+  assert.equal(ui.nodes.get('trackingBegin').textContent, '验证新版并安装');
+  assert.match(ui.nodes.get('trackingGate').textContent, /先验证官方缓存/);
+  assert.match(ui.nodes.get('draftStatus').textContent, /需验证基线/);
+  assert.equal(ui.calls.filter(c=>c.method==='POST').length, 0);
+});
+
+test('previous plugin completion is hidden when choosing a different plugin', async () => {
+  const ui = await app();
+  ui.tracking.completed = {plugin:'dsh-whale-widget', count:0};
+  ui.nodes.get('trackingName').value = '@sunshaobo/dsh-session-manager';
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('trackingCompleted').hidden, true);
+  ui.nodes.get('trackingName').value = 'dsh-whale-widget';
+  ui.nodes.get('trackingName').oninput();
+  assert.equal(ui.nodes.get('trackingCompleted').hidden, false);
+});
+
+test('installation preparation reports live counts instead of a silent disabled button', async () => {
+  const ui = await app();
+  ui.run("store.dispatch({type:'operation/start'})");
+  ui.run("store.dispatch({type:'operation/observed', epoch:model.operation.epoch, current:{kind:'tracking/begin', durationMs:12000, progress:{label:'复核官方文件',completed:12,total:30}}})");
+  assert.equal(ui.nodes.get('trackingBegin').disabled, true);
+  assert.match(ui.nodes.get('trackingGate').textContent, /复核官方文件.*12 \/ 30.*12 秒/);
+  assert.equal(ui.nodes.get('trackingCompleted').hidden, true);
+});
+
+test('failed install preparation keeps the reason in the form and never repeats the write', async () => {
+  const ui = await app(); const normal = ui.respond;
+  ui.respond = (path, options) => path==='tracking/begin' ? response({error:'新版文件存在冲突，未安装'},400) : normal(path,options);
+  await ui.run("trackingAction('begin',{name:'plugin-new',source:'plugin-new@1.0.0'})");
+  assert.equal(ui.nodes.get('trackingRequestError').hidden, false);
+  assert.match(ui.nodes.get('trackingRequestError').textContent, /冲突/);
+  assert.equal(ui.calls.filter(c=>c.url==='/api/tracking/begin').length, 1);
+  assert.equal(ui.run('model.operation.busy'), false);
 });
 
 test('official host verification only previews until explicit accept with token', async () => {
@@ -535,4 +766,51 @@ test('official host verification only previews until explicit accept with token'
   await ui.nodes.get('hostAccept').onclick();
   assert.deepEqual(JSON.parse(ui.calls.find(c=>c.url.includes('official-host/accept')).body), {token:'host1'});
   assert.equal(ui.nodes.get('hostAccept').hidden, true);
+});
+
+test('official update preview never installs and execute consumes its exact token once', async () => {
+  const ui = await app(); const online = ui.respond;
+  ui.respond = (path, options) => path === 'official-update/prepare' ? response({token:'upgrade-1', message:'verified preview'})
+    : path === 'official-update/execute' ? response({message:'adopted', suspended:{'dsh-purge':'requires new patch'}}) : online(path, options);
+  await ui.nodes.get('officialUpdatePrepare').onclick();
+  assert.equal(ui.nodes.get('officialUpdateExecute').hidden, false);
+  assert.equal(ui.calls.filter(c=>c.url.includes('official-update/execute')).length, 0);
+  await ui.nodes.get('officialUpdateExecute').onclick();
+  await ui.nodes.get('officialUpdateExecute').onclick();
+  const writes = ui.calls.filter(c=>c.url.includes('official-update/execute'));
+  assert.equal(writes.length, 1);
+  assert.deepEqual(JSON.parse(writes[0].body), {token:'upgrade-1'});
+  assert.match(ui.nodes.get('officialUpdateStatus').textContent, /dsh-purge/);
+});
+
+test('cached official update enables launch reconciliation while apply remains guarded', async () => {
+  const ui = await app();
+  ui.state.hostHealth = {status:'changed'};
+  ui.state.runtimeHealth = {status:'missing'};
+  ui.state.officialUpdate = {pending:null, autoAvailable:true};
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('launch').disabled, false);
+  assert.equal(ui.nodes.get('apply').disabled, true);
+  assert.equal(ui.calls.filter(c=>c.url.includes('official-update/reconcile')).length, 0);
+});
+
+test('pending official install blocks launch and exposes recovery without retrying installation', async () => {
+  const ui = await app();
+  ui.state.officialUpdate = {pending:{phase:'installing',version:'0.3.0',error:'installer still active'}};
+  await ui.run('refresh()');
+  assert.equal(ui.nodes.get('launch').disabled, true);
+  assert.equal(ui.nodes.get('officialUpdateAbort').hidden, false);
+  assert.match(ui.nodes.get('officialUpdateStatus').textContent, /installer still active/);
+  assert.equal(ui.calls.filter(c=>c.url.includes('official-update/execute')).length, 0);
+});
+
+test('suspended plugins do not block native launch and cannot be selected by select all', async () => {
+  const ui = await app();
+  ui.state.enabled = [];
+  ui.state.plugins[0].suspended = 'not compatible with current host';
+  ui.state.plugins[0].tracking = 'untracked';
+  await ui.run('refresh(true)');
+  ui.nodes.get('selectAll').onclick();
+  assert.deepEqual(Array.from(ui.run('model.draft.ids')), []);
+  assert.equal(ui.nodes.get('launch').disabled, false);
 });

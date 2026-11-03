@@ -170,7 +170,7 @@ class PatchModes:
         self.home = context.home
         self.resources = context.resources
         self.root = context.patch_root
-        self.store = ContentStore(self.root)
+        self.store = ContentStore(context.base_patch_root)
         self.record = self.root / 'state.json'
         self.app = self.resources / 'app'
         self.archive = self.resources / 'app.asar'

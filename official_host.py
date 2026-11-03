@@ -5,11 +5,9 @@ adapter state, snapshots and packages stay byte-for-byte intact. An approval onl
 permits the already-native manifest to launch, not plugin switching or recording.
 """
 from contextlib import ExitStack
-import base64
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import time
 import uuid
 
@@ -119,6 +117,12 @@ class OfficialHost:
         view = FileView(paths.values(), verification_cache=self.manager.verification_cache)
         view.hash_files(progress=lambda n, total: report_progress('files', '复核新版官方启动文件', n, total))
         bad = [name for name, path in paths.items() if view.hash(path) != value['files'][name]]
+        from runtime_integrity import python_extras
+        bad.extend(python_extras(self.manager, exe.parent, value['files']))
+        if bad:
+            from runtime_integrity import verified_python_caches
+            accepted = verified_python_caches(self.manager, exe.parent, value['files'], bad)
+            bad = [name for name in bad if name not in accepted]
         if bad:
             blocked('官方文件缺失或存在内容冲突，未覆盖：' + '、'.join(bad[:4]))
         # Unknown unpacked/CLI files could change module resolution. Retain but
@@ -140,50 +144,21 @@ class OfficialHost:
             blocked('校验期间宿主或原生记录变化，请重新检查。', 'official_host_stale')
 
     def prepare(self, installer=None, sha512=None):
-        with self.manager.lock, self.manager.verification_cache.session():
+        with self.manager.lock, self.manager.verification_cache.session(), self.manager.official_packages.session():
             self.plan = None
             controls = self.native_inputs()
-            source, expected = self.manager.runtime_repair.candidate(installer, sha512)
-            base = repair.safe_path(self.manager.data / 'official-host-staging')
-            base.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(base).free < source.stat().st_size * 2 + 64 * 1024 ** 2:
-                blocked('暂存磁盘空间不足。')
-            stage = base / uuid.uuid4().hex
-            stage.mkdir()
-            cleanup_pending = False
-            try:
-                cached = stage / 'installer.exe'
-                report_progress('packages', '验证新版官方安装包 SHA-512 与签名')
-                with repair.read_lease(source):
-                    shutil.copyfile(source, cached)
-                with repair.read_lease(cached):
-                    with cached.open('rb') as f:
-                        checksum = hashlib.file_digest(f, 'sha512').digest()
-                    if checksum != expected:
-                        blocked('安装包 SHA-512 不匹配。')
-                    signed = repair.signature(cached)
-                    payload, sizes = repair.SevenZip().extract_host(cached, stage)
-                files = {}
-                for i, (name, size) in enumerate(sizes.items(), 1):
-                    path = repair.safe_path(payload / name)
-                    if not repair.regular(path) or path.stat().st_size != size:
-                        blocked('官方解压文件与清单不一致：' + name)
-                    files[name] = hash_file(path)
-                    if i % 50 == 0 or i == len(sizes):
-                        report_progress('files', '建立新版官方启动校验清单', i, len(sizes))
-                value = {'format': 1, 'kind': 'official-native-launch', 'version': signed['version'],
-                         'publisher': signed['publisher'], 'installerSHA512': base64.b64encode(checksum).decode(),
-                         'executable': self.manager.settings['executable'], 'controls': controls, 'files': files}
-                self.verify(value)
-            finally:
-                # Only this call's newly created UUID directory; never host or profile.
-                try:
-                    shutil.rmtree(repair.safe_path(stage))
-                except OSError:
-                    cleanup_pending = True
+            package = self.manager.official_packages.inspect(installer, sha512)['value']
+            anchors = {'resources/runtime/' + name for name in repair.ANCHORS}
+            files = {name: entry['sha256'] for name, entry in package['files'].items()
+                     if not name.startswith('resources/runtime/') or
+                     name.startswith('resources/runtime/cli/') or name in anchors}
+            value = {'format': 1, 'kind': 'official-native-launch', 'version': package['signed']['version'],
+                     'publisher': package['signed']['publisher'], 'installerSHA512': package['sha512'],
+                     'executable': self.manager.settings['executable'], 'controls': controls, 'files': files}
+            self.verify(value)
             self.plan = {'token': uuid.uuid4().hex, 'created': time.monotonic(), 'value': value}
             return {'token': self.plan['token'], 'version': value['version'], 'files': len(files),
-                    'cleanupPending': cleanup_pending,
+                    'cleanupPending': False,
                     'message': f'官方签名及 {len(files)} 个启动文件校验通过；可保存独立原生基线。旧插件和回滚数据不变。'}
 
     def accept(self, token):

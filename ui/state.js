@@ -46,7 +46,7 @@ const LauncherState = (() => {
         // makes the backend reject an otherwise valid custom selection.
         const preset = draft.mode === 'scheme' ? (Object.hasOwn(server.schemes, draft.scheme) ? server.schemes[draft.scheme] : null)
           : draft.mode === 'current' ? server.enabled
-          : draft.mode === 'all' ? server.plugins.filter(plugin => plugin.available).map(plugin => plugin.id)
+          : draft.mode === 'all' ? server.plugins.filter(plugin => plugin.available && !plugin.suspended).map(plugin => plugin.id)
           : draft.mode === 'none' ? [] : null;
         if (draft.mode !== 'custom' && (!preset || !sameSelection(draft.ids, preset))) {
           draft.mode = 'custom'; draft.scheme = '';
@@ -73,13 +73,13 @@ const LauncherState = (() => {
         if (!model.server || model.operation.busy) return model;
         if (!['current', 'none', 'all'].includes(event.preset)) throw new Error('Unknown selection preset');
         const ids = event.preset === 'none' ? [] : event.preset === 'all'
-          ? model.server.plugins.filter(plugin => plugin.available).map(plugin => plugin.id) : [...model.server.enabled];
+          ? model.server.plugins.filter(plugin => plugin.available && !plugin.suspended).map(plugin => plugin.id) : [...model.server.enabled];
         return {...model, draft: {ids, mode: event.preset, scheme: ''}};
       }
       case 'draft/toggle': {
         if (model.operation.busy) return model;
         const plugin = model.server?.plugins.find(plugin => plugin.id === event.id);
-        if (!plugin || event.checked && !plugin.available) return model;
+        if (!plugin || event.checked && (!plugin.available || plugin.suspended)) return model;
         const ids = new Set(model.draft.ids);
         if (event.checked) ids.add(event.id); else ids.delete(event.id);
         return {...model, draft: {ids: [...ids], mode: 'custom', scheme: ''}};
@@ -101,19 +101,32 @@ const LauncherState = (() => {
     const patch = server?.patchMode;
     const adapterManaged = patch && (patch.mode !== 'unmanaged' || server.plugins.some(plugin => plugin.id === patch.plugin));
     const patchChanged = Boolean(patch?.supported && (patch.pending || adapterManaged && patch.mode !== (ids.has(patch.plugin) ? 'plugin' : 'native')));
-    const untracked = Boolean(server?.plugins.some(plugin => plugin.tracking === 'untracked' && plugin.id !== tracking?.session?.plugin));
-    const recording = Boolean(tracking?.session || tracking?.busy || server?.maintenance?.pending);
+    const untracked = Boolean(server?.plugins.some(plugin => plugin.tracking === 'untracked' && !plugin.suspended && plugin.id !== tracking?.session?.plugin));
+    const recording = Boolean(tracking?.session || tracking?.busy || tracking?.pending || server?.maintenance?.pending || server?.officialUpdate?.pending);
     const connected = model.connection.status === 'online';
-    const runtimeReady = !server?.runtimeHealth || server.runtimeHealth.status === 'ready';
+    const autoUpdate = Boolean(server?.officialUpdate?.autoAvailable);
+    const runtimeReady = !server?.runtimeHealth || server.runtimeHealth.status === 'ready' || autoUpdate && server.runtimeHealth.status === 'missing';
     const hostStatus = server?.hostHealth?.status || 'ready';
     const hostReady = hostStatus === 'ready';
+    const prepareTracking = autoUpdate && ['changed', 'native_ready'].includes(hostStatus);
+    const trackingBlockedReason = !server ? '正在读取安装条件，请稍候。'
+      : !connected ? '与启动器后台的连接尚未恢复，请先重新连接。'
+      : model.operation.busy ? '正在处理当前操作，请等待完成。'
+      : server.officialUpdate?.pending ? '官方更新尚未完成，请到设置中继续检查更新结果。'
+      : server.maintenance?.pending ? '插件维护尚未完成，请到“更新与卸载”处理恢复。'
+      : recording ? '安装记录或组合切换尚未完成，请先处理当前任务。'
+      : server.running ? '请先完全退出 Harness（包括托盘），再建立快照并安装。'
+      : !server.executableExists ? '未找到 Harness 程序，请先在设置中修正应用路径。'
+      : untracked ? '已有插件缺少安装前记录，需先恢复干净的安装。'
+      : !runtimeReady ? (server.runtimeHealth?.message || '运行时文件需要修复，请先在设置中检查。')
+      : !hostReady && !prepareTracking ? '官方程序已更新，需先在设置中验证并接续新版基线，才能安装插件。' : '';
     const nativeReady = hostStatus === 'native_ready' && selection.length === 0 && !server.enabled.length && model.draft.mode !== 'scheme';
     const canSwitch = Boolean(server && connected && !model.operation.busy && !recording && !server.running && server.executableExists && !untracked);
     return {
       selection, changed, patchChanged, untracked, recording, connected,
-      canLaunch: canSwitch && runtimeReady && (hostReady || nativeReady), canApply: canSwitch && hostReady && (changed || patchChanged), canRestore: canSwitch && hostReady,
+      canLaunch: canSwitch && runtimeReady && (hostReady || nativeReady || autoUpdate && hostStatus === 'changed'), canApply: canSwitch && hostReady && (changed || patchChanged), canRestore: canSwitch && hostReady,
       canSaveScheme: Boolean(server && connected && !model.operation.busy),
-      canBeginTracking: Boolean(server && connected && !model.operation.busy && !recording && !server.running && server.executableExists && !untracked && runtimeReady && hostReady),
+      canBeginTracking: !trackingBlockedReason, trackingBlockedReason, prepareTracking,
       canManageTracking: connected && !model.operation.busy && !tracking?.busy && !server?.running,
       canQuit: ['online', 'error'].includes(model.connection.status) && !model.operation.busy && !tracking?.busy && !(tracking?.session && !tracking.session.error)
     };

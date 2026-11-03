@@ -43,7 +43,12 @@ class RuntimeRepairTests(unittest.TestCase):
             lock=threading.RLock(), require_stopped=Mock(),
             tracking=SimpleNamespace(busy=False, summary=lambda: {'session': None}),
             maintenance=SimpleNamespace(load=lambda: None))
+        from official_package import OfficialPackages
+        from verification_cache import VerifiedContentCache
+        self.manager.verification_cache = VerifiedContentCache(self.manager.data / 'verification.json')
         self.service = repair.RuntimeRepair(self.manager)
+        self.manager.runtime_repair = self.service
+        self.manager.official_packages = OfficialPackages(self.manager)
         self.addCleanup(self.service.discard)
         self.sig = patch('runtime_repair.signature', return_value={'version': '0.2.1-rc.3', 'publisher': repair.PUBLISHER, 'status': 'Valid'})
         self.verify = self.sig.start()
@@ -54,8 +59,9 @@ class RuntimeRepairTests(unittest.TestCase):
 
         def extract(installer, stage):
             shutil.copytree(self.payload, stage / 'payload')
-            return stage / 'payload', self.entries
-        self.extractor.extract.side_effect = extract
+            return stage / 'payload', {**{'resources/runtime/' + n: size for n, size in self.entries.items()}, **{n: (self.payload / n).stat().st_size for n in ('DeepSeek Harness.exe', 'resources/app.asar')}}
+        self.extractor.extract_all.side_effect = extract
+        self.extractor.extract_members.side_effect = lambda installer, stage, names: extract(installer, stage)[0]
 
     def prepare(self):
         return self.service.prepare(str(self.installer), self.sha512)
@@ -66,7 +72,7 @@ class RuntimeRepairTests(unittest.TestCase):
             with self.assertRaises(LauncherError):
                 self.service.require_ready()
         self.verify.assert_not_called()
-        self.extractor.extract.assert_not_called()
+        self.extractor.extract_all.assert_not_called()
 
     def test_repair_preserves_user_files_records_and_existing_runtime(self):
         target = self.service.root / repair.ANCHORS[0]
@@ -94,14 +100,14 @@ class RuntimeRepairTests(unittest.TestCase):
     def test_wrong_checksum_rejected_before_extraction(self):
         with self.assertRaisesRegex(LauncherError, 'SHA-512 不匹配'):
             self.service.prepare(str(self.installer), '00' * 64)
-        self.extractor.extract.assert_not_called()
+        self.extractor.extract_all.assert_not_called()
         self.assertFalse(self.service.root.exists())
 
     def test_signature_error_never_extracts_or_writes_host(self):
         self.verify.side_effect = LauncherError('invalid signature')
         with self.assertRaisesRegex(LauncherError, 'invalid signature'):
             self.prepare()
-        self.extractor.extract.assert_not_called()
+        self.extractor.extract_all.assert_not_called()
         self.assertFalse(self.service.root.exists())
 
     def test_same_version_wrong_host_bytes_are_rejected(self):

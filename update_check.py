@@ -13,7 +13,7 @@ from catalog import Catalog, CatalogError, PACKAGE
 
 
 SEMVER = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$')
-GITHUB = re.compile(r'^(?:git\+)?https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?(?:#([\w./-]+))?$')
+GITHUB = re.compile(r'^(?:(?:git\+)?https://github\.com/|github:)([\w.-]+/[\w.-]+?)(?:\.git)?(?:#([\w./-]+))?$')
 
 
 def newer(candidate, installed):
@@ -31,16 +31,18 @@ def newer(candidate, installed):
 class UpdateCheck:
     def __init__(self, manager, catalog=None):
         self.manager = manager
-        self.catalog = catalog or Catalog()
+        self.catalog = catalog or getattr(manager, 'catalog', None) or Catalog()
 
     def inventory(self):
         with self.manager.lock:
             _, manifest, bundles = self.manager.manifest()
             rows = self.manager.discover(manifest, bundles)
+            suspended = self.manager.tracking.load().get('suspended', {})
             dependencies = {**manifest.get('devDependencies', {}), **manifest.get('optionalDependencies', {}),
                             **manifest.get('dependencies', {})}
             for row in rows:
                 row['source'] = dependencies.get(row['id'], '')
+                row['suspended'] = suspended.get(row['id'], '')
         return rows
 
     def one(self, row):
@@ -54,15 +56,31 @@ class UpdateCheck:
             if git:
                 repo, ref = git.groups()
                 if ref and re.fullmatch('[a-fA-F0-9]{40}', ref):
+                    if row.get('suspended'):
+                        value = self.catalog.cached(('update-pinned', repo, ref), lambda: self.catalog.fetch(
+                            'https://api.github.com/repos/' + repo + '/contents/package.json?ref=' + ref))
+                        meta = json.loads(base64.b64decode(value['content']))
+                        if meta.get('name') != row['id'] or meta.get('version') != row['version'] or value.get('stale'):
+                            raise CatalogError('固定提交与已安装插件身份不符，不能重新验证。')
+                        result.update(status='revalidate', latest=meta['version'], target=source,
+                                      message='保持原固定提交；可建立当前宿主的新记录，旧补丁不会重放。')
+                        return result
                     result['message'] = '此来源固定到 Git 提交；保持固定版本，不自动跟随分支。'
                     return result
-                branch = ref or self.catalog.fetch('https://api.github.com/repos/' + repo)['default_branch']
+                repository = None if ref else self.catalog.cached(('update-repository', repo),
+                    lambda: self.catalog.fetch('https://api.github.com/repos/' + repo))
+                if repository and repository.get('stale'):
+                    raise CatalogError('仓库查询使用过期缓存，请恢复网络后重试。')
+                branch = ref or repository['default_branch']
                 commit = self.catalog.cached(('update-commit', repo, branch), lambda: self.catalog.fetch(
                     'https://api.github.com/repos/' + repo + '/commits/' + quote(branch, safe='')))
                 sha = commit.get('sha', '')
-                if not re.fullmatch('[a-f0-9]{40}', sha):
+                if commit.get('stale') or not re.fullmatch('[a-f0-9]{40}', sha):
                     raise CatalogError('GitHub 没有返回有效提交。')
-                value = self.catalog.fetch('https://api.github.com/repos/' + repo + '/contents/package.json?ref=' + sha)
+                value = self.catalog.cached(('update-git-package', repo, sha), lambda: self.catalog.fetch(
+                    'https://api.github.com/repos/' + repo + '/contents/package.json?ref=' + sha))
+                if value.get('stale'):
+                    raise CatalogError('目标清单查询使用过期缓存，请恢复网络后重试。')
                 meta = json.loads(base64.b64decode(value['content']))
                 if meta.get('name') != row['id'] or not SEMVER.fullmatch(meta.get('version', '')):
                     raise CatalogError('目标提交的包名或版本不匹配。')
@@ -135,6 +153,8 @@ class UpdateCheck:
                 result.update(status='manual', message='版本已弃用或查询使用过期缓存，请核实后重试。')
             if SEMVER.fullmatch(version).group(4):
                 result.update(status='manual', message='最新标签指向预发布版本，当前自动升级只选择稳定版。')
+            if row.get('suspended') and result['status'] == 'current' and version == row['version']:
+                result.update(status='revalidate', message='当前版本尚未在此宿主完成验证；可重新安装并记录，验证成功后解除暂停。')
         except (CatalogError, KeyError, TypeError, ValueError, OSError) as exc:
             result.update(status='error', message=str(exc))
         return result
@@ -150,7 +170,9 @@ class UpdateCheck:
         if row is None:
             raise CatalogError('插件已不在安装列表，请刷新。')
         result = self.one(row)
-        if result['status'] not in ('available', 'source-change') or result['target'] != requested:
+        if result['status'] == 'error':
+            raise CatalogError('无法重新验证安装来源：' + result.get('message', '查询失败。'))
+        if result['status'] not in ('available', 'source-change', 'revalidate') or result['target'] != requested:
             raise CatalogError('更新目标已变化或不可自动升级，请重新检查更新。')
         # Re-read the exact version before a write; never execute a floating latest tag.
         git = GITHUB.fullmatch(requested)

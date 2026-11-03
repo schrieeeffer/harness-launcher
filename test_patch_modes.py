@@ -11,8 +11,8 @@ from launcher import Manager, MenuError, OFFICIAL
 from patch_modes import PatchError, PatchModes, archive_file, archive_info, file_hash, tree_hash
 
 
-def make_asar(path):
-    contents = {'package.json': json.dumps({'name': '@deepseek-ai/dsh-desktop', 'version': '0.2-test', 'dshBuildCommit': 'test'}).encode(),
+def make_asar(path, version='0.2-test'):
+    contents = {'package.json': json.dumps({'name': '@deepseek-ai/dsh-desktop', 'version': version, 'dshBuildCommit': 'test'}).encode(),
                 'main.js': b'// official original code\n'}
     files, payload, offset = {}, b'', 0
     for name, data in contents.items():
@@ -81,6 +81,9 @@ class PatchModeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+        environment = patch.dict(os.environ, LOCALAPPDATA=str(self.root / 'local-app-data'))
+        environment.start()
+        self.addCleanup(environment.stop)
         self.home = self.root / 'home'
         self.profile = self.home / 'profiles' / 'desktop'
         self.profile.mkdir(parents=True)

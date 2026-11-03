@@ -43,7 +43,7 @@ class OfficialHostTests(unittest.TestCase):
         def extract(installer, stage):
             shutil.copytree(self.payload, stage / 'payload')
             return stage / 'payload', self.sizes
-        self.extractor.extract_host.side_effect = extract
+        self.extractor.extract_all.side_effect = extract
         self.service = self.manager.official_host
 
     def prepare(self):
@@ -96,7 +96,7 @@ class OfficialHostTests(unittest.TestCase):
         self.signature.side_effect = LauncherError('bad signature')
         with self.assertRaisesRegex(LauncherError, 'bad signature'):
             self.prepare()
-        self.extractor.extract_host.assert_not_called()
+        self.extractor.extract_all.assert_not_called()
         self.assertFalse(self.service.pointer.exists())
 
     def test_installed_host_and_dependency_conflict_are_not_adopted(self):
