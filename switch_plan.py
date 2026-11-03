@@ -452,13 +452,17 @@ class SwitchPlan:
         if self.tracker.load() != plan['previous'] or self.core.load() != plan['inputCore']:
             raise PatchError('预检后版本索引发生变化，未开始切换，请刷新重试。')
         _, obj, bundles = self.manager.manifest()
+        # Use the same active set as preflight. Installed packages suspended
+        # after a host update are deliberately absent from this generation's
+        # records; they cannot be selected, but must not block other plugins.
+        plugins = self.manager.active_plugins(self.manager.discover(obj, bundles))
         configuration_only = plan.get('configurationOnly', False)
         if configuration_only:
             previous = self.tracker.read_object(plan['previous']['currentCombination'])
-            if not self.verify_current(previous['selection'], self.manager.discover(obj, bundles),
+            if not self.verify_current(previous['selection'], plugins,
                                        self.core.bytes(previous['manifestHash'])):
                 raise PatchError('当前组合已变化，未修改加载配置，请刷新重试。')
-        self.tracker.check_versions(self.manager.discover(obj, bundles), plan['selection'])
+        self.tracker.check_versions(plugins, plan['selection'])
         if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != plan['host']:
             raise PatchError('Harness 在预检后发生更新，未开始切换。')
         inputs = self.file_view([self.manager.manifest_path] if configuration_only else

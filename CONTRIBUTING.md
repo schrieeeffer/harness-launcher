@@ -21,7 +21,7 @@ node --check ui/app.js
 node --test test_ui.cjs
 ```
 
-测试使用临时目录、合成数据和模拟的公开接口，**绝不能**安装真实插件或修改真实的 Harness 配置。
+自动化测试使用临时目录、合成数据和模拟的公开接口，不操作真实 Harness 配置。真实插件验收在用户授权的安装中单独进行，保留恢复检查点，并记录版本、操作结果和耗时。
 
 ### 代码原则
 
@@ -38,9 +38,9 @@ node --test test_ui.cjs
 ### 文档与截图
 
 - 用户文档有中英两个版本：`README.md` / `README.en.md`，以及 `docs/patch-recording.md` / `docs/patch-recording.en.md`。**修改时请同时更新两种语言**，并保持标题结构一致。
-- 截图放在 `docs/images/`，使用 PNG 格式。截图**只能**使用合成的 profile 和示例数据（例如 `C:\Users\demo`、`@demo/...` 这类插件名），不能出现真实的用户名、路径、插件配置或访问令牌。
+- 截图放在 `docs/images/`，保留工具返回的 PNG 或 JPEG 格式。功能示例可用合成数据；真实验收截图须经用户授权，并收起私人会话、账号信息和带访问令牌的地址。明确区分示例与实测。
 - 界面变化影响到截图时，请重新截取对应的图片。
-- 用户可见的变化请记录在 `CHANGELOG.md` 的 Unreleased 部分。
+- 用户可见的变化请记录在 `CHANGELOG.md` 的当前版本部分。
 - 请写明支持的应用版本和平台，不要把基于测试夹具的测试描述成完整的平台认证。
 
 ### 不要提交
@@ -70,7 +70,7 @@ node --check ui/app.js
 node --test test_ui.cjs
 ```
 
-Tests use temporary folders, synthetic data and mocked public APIs. They must **never** install a real plugin or change a real Harness profile.
+Automated tests use temporary folders, synthetic data and mocked public APIs without changing a real Harness profile. Run real-plugin acceptance separately on a user-authorized installation, keep recovery checkpoints, and record versions, results and timings.
 
 ### Code principles
 
@@ -87,9 +87,9 @@ Tests use temporary folders, synthetic data and mocked public APIs. They must **
 ### Documentation and screenshots
 
 - User documentation exists in Chinese and English: `README.md` / `README.en.md` and `docs/patch-recording.md` / `docs/patch-recording.en.md`. **Update both languages together** and keep their heading structure aligned.
-- Screenshots live in `docs/images/` as PNG files. They must **only** use a synthetic profile and sample data (for example `C:\Users\demo` and plugin names like `@demo/...`); real user names, paths, plugin configurations or access tokens must never appear.
+- Keep screenshots in `docs/images/` in the PNG or JPEG format returned by the capture tool. Examples may use synthetic data. Real acceptance screenshots require user authorization; hide private conversations, account information and token-bearing addresses. Label examples and real tests accurately.
 - Retake affected screenshots when the UI changes.
-- Record user-visible changes under Unreleased in `CHANGELOG.md`.
+- Record user-visible changes under the current version in `CHANGELOG.md`.
 - Document supported application versions and platforms, and do not describe fixture-based tests as full platform certification.
 
 ### Do not commit

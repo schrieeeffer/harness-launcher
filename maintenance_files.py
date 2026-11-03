@@ -171,7 +171,7 @@ class CheckpointFiles:
         return [key for key in sorted(set(before) | set(after))
                 if cls.identity(before.get(key)) != cls.identity(after.get(key))]
 
-    def restore(self, desired, expected, before_write=lambda: None):
+    def restore(self, desired, expected, before_write=lambda: None, progress=None):
         changes = self.changes(expected, desired)
         # After an interrupted directory-to-link rollback the parent link may
         # already be restored. Its former managed children are now absent from
@@ -182,7 +182,15 @@ class CheckpointFiles:
         if any(key in desired for key in hidden):
             raise LauncherError('恢复记录不能在链接目录内包含子文件。')
         changes = [key for key in changes if key not in hidden]
-        for key in changes:
+        last_report = 0
+        def report(label, done):
+            nonlocal last_report
+            now = time.monotonic()
+            if progress and (done == 0 or done == len(changes) or now - last_report >= .2):
+                progress(label, done, len(changes))
+                last_report = now
+        for index, key in enumerate(changes):
+            report('校验待恢复内容', index)
             self.path(key, leaf_link=True)
             actual = self.entry(key)
             if self.identity(actual) not in (self.identity(expected.get(key)), self.identity(desired.get(key))):
@@ -194,11 +202,13 @@ class CheckpointFiles:
                 _, external = self.checked_link(key, entry['target'])
                 if external and not entry.get('external'):
                     raise LauncherError('依赖链接越界。')
+        report('校验待恢复内容', len(changes))
         # Remove only leaves and empty directories. A new/unrecognized file
         # makes rmdir fail; it is never recursively erased with its parent.
         def depth(key):
             return len(self.path(key, leaf_link=True).parts)
-        for key in sorted(changes, key=depth, reverse=True):
+        for index, key in enumerate(sorted(changes, key=depth, reverse=True)):
+            report('移除已记录的替换条目', index)
             before_write()
             old, new = self.entry(key), desired.get(key)
             if self.identity(old) == self.identity(new) or old is None:
@@ -212,7 +222,9 @@ class CheckpointFiles:
                 path.rmdir()
             else:
                 path.unlink()
-        for key in sorted(changes, key=depth):
+        report('移除已记录的替换条目', len(changes))
+        for index, key in enumerate(sorted(changes, key=depth)):
+            report('写回检查点文件', index)
             before_write()
             new = desired.get(key)
             if not new:
@@ -238,3 +250,4 @@ class CheckpointFiles:
                     _winapi.CreateJunction(str(target), str(path))
                 else:
                     os.symlink(new['target'], path, target_is_directory=new['directory'])
+        report('写回检查点文件', len(changes))

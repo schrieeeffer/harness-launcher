@@ -230,8 +230,12 @@ class FileCheckpointTests(unittest.TestCase):
         (self.files / 'extra').mkdir()
         (self.files / 'extra' / 'new').write_bytes(b'new')
         after = self.checkpoint.snapshot()
-        self.checkpoint.restore(before, after)
+        progress = []
+        self.checkpoint.restore(before, after, progress=lambda *event: progress.append(event))
         self.assertFalse(self.checkpoint.changes(before, self.checkpoint.snapshot(False)))
+        self.assertEqual(progress[-1], ('写回检查点文件', 4, 4))
+        self.assertEqual({label for label, done, total in progress},
+                         {'校验待恢复内容', '移除已记录的替换条目', '写回检查点文件'})
 
     def test_checkpoint_reports_actual_files_and_keeps_enclosing_phase(self):
         (self.files / 'one').write_bytes(b'one')

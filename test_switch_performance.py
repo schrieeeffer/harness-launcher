@@ -1,5 +1,6 @@
 """Optimized switches retain content and recovery checks in isolated fixtures."""
 import copy
+import json
 import os
 import threading
 import unittest
@@ -250,6 +251,26 @@ class NativeSwitchTests(unittest.TestCase):
             planner.execute(plan)
         replay.assert_not_called()
         self.assertEqual(self.manifest.read_bytes(), raw)
+
+    def test_suspended_unselected_package_does_not_block_bundle_switch(self):
+        self.record_bundle_only()
+        paused = self.profile / 'node_modules/plugin-b'
+        paused.mkdir()
+        metadata = json.dumps({'name': 'plugin-b', 'version': '1.0', 'dsh': {'bundle': {}}}).encode()
+        (paused / 'package.json').write_bytes(metadata)
+        tracker = self.manager.tracking
+        state = tracker.load()
+        state['suspended'] = {'plugin-b': 'Needs verification on the current host'}
+        tracker.save(state)
+        for selection in ([], ['plugin-a'], []):
+            self.apply(selection)
+            self.assertEqual(self.manager.state()['enabled'], selection)
+            self.assertEqual((paused / 'package.json').read_bytes(), metadata)
+        before = self.manifest.read_bytes()
+        with self.assertRaises(MenuError) as error:
+            self.apply(['plugin-b'])
+        self.assertEqual(error.exception.code, 'plugin_host_incompatible')
+        self.assertEqual(self.manifest.read_bytes(), before)
 
     def test_bundle_only_flag_rejects_file_mutations_and_nonboolean_values(self):
         self.record_bundle_only()

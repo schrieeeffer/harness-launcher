@@ -1,11 +1,37 @@
 # Architecture and data contract / 架构与数据契约
 
-This describes the 0.4.2 implementation. Runtime control data uses format 3.
-本文说明 0.4.2 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.0.md)。
+This describes the 0.4.3 implementation. Runtime control data uses format 3.
+本文说明 0.4.3 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.3.md)。
+
+## Official update generations / 官方版本接续
+
+![官方更新事务与共享认证架构](images/official-update-architecture.svg)
+
+![官方版本接续的校验原理](images/official-update-principle.svg)
+
+`OfficialPackages` 为 `RuntimeRepair`、`OfficialHost` 和 `OfficialUpdate` 提供同一份经过认证的文件清单。清单按内容寻址，签名复验时间保存在轻量收据中，复验不复制整份清单。只使用已有官方包，不增加下载通道。
+
+`OfficialUpdate` 在官方安装前保存检查点并还原插件；安装后先比对官方文件，再补缺失、判断兼容性。活动登记表按版本代际隔离，`active-host.json` 原子切换；旧登记表和 purge 暂存目录不改写。各代际共享原有内容存储，GC 将所有代际与事务恢复点列为引用根。
+
+切换预演和原生基线补全都通过所属 `ContentStore` 读取恢复内容，不能用代际登记目录拼接 blob 路径。宿主适配器负责整份解包树的移动，其他受管配置差异交给通用记录层；原生字节来自当前宿主上的安装前检查点。维护检查点将指向已配置官方运行时的链接视为叶子，只校验并恢复链接本身，不穿过链接备份或删除运行时文件。
+
+仅无文件差异且版本范围和包身份可确认的插件自动接续。未知改动、原生扩展和 purge 暂停；新记录通过验证后可解除暂停。中断后继续已有计划，不自动重复执行安装器；官方宿主未变化时才允许撤销升级准备并恢复旧插件组合。
+
+[使用说明、设计图源与未完成的真实升级验收](official-update-flow.md)
 
 ## Architecture diagram / 架构图
 
-![当前模块架构图](images/architecture-0.4.0.svg)
+![插件维护与恢复流程](images/maintenance-flow.svg)
+
+`installer_policy.py` 在安装、升级和卸载期间通过官方 pnpm 配置接口临时禁止非目标插件构建，完成后恢复这些插件原来的策略；目标包的精确来源授权保留。维护失败沿用同一份文件检查点恢复。普通插件卸载只使用自身记录，归档适配器的检查限定在对应插件。
+
+`CacheGC` 每次确认前先枚举一次对象名称，再遍历记录引用，避免为官方清单中的每个哈希反复访问文件系统。最终候选限定为此次枚举中的对象；确认执行时重新核对引用、路径与内容。扫描期间新建的对象留到后续清理。
+
+新增安装来源边界：`InstallSources` 只读检查 npm 发布元数据、Git 固定提交中的安装文件或本地构建入口，发放五分钟、绑定包名和来源的凭据。HTTP 开始安装前复核凭据，本地入口内容变化则拒绝；之后才交给 `Manager.begin_tracking` 执行宿主接续、快照与安装。普通启动和组合切换不调用远端来源检查。[界面流程与实测截图](install-sources.md)。
+
+`VersionStore` 对 Web 插件的 peer 依赖还检查官方前端静态模块注册表（`host_modules.py`）：仅识别从 HTML 入口加载、传给启动加载器的受支持字面量表，不执行 JavaScript。结果绑定前端清单、入口文件、HTML、ASAR 与 EXE 内容；未知结构不授权，更新后重新验证。状态轮询使用已发布的记录器及原子登记文件，不等待保存文件时的全局锁；实际写操作仍经过该锁。
+
+![当前模块架构图](images/architecture-0.4.3.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
@@ -14,12 +40,16 @@ This describes the 0.4.2 implementation. Runtime control data uses format 3.
 flowchart TB
     UI["浏览器：开关草稿、方案、启动进度"] --> API["HTTP API / Manager\n认证、运行状态、配置版本检查"]
     API --> UP["UpdateCheck\n按来源查询，固定版本或提交；5 分钟缓存"]
+    UP --> CAT["共享 Catalog\n执行前复核精确目标；连接失败保留真实原因"]
+    CAT --> TLS["公共 HTTPS 元数据\nPython / Windows 系统证书验证"]
     API --> RT["RuntimeRepair\n启动前必需文件探测 / 显式完整检查"]
     RT --> PK["同版本官方包\n签名 + 发布者 + SHA-512 + EXE/ASAR 内容一致"]
     PK --> ADD["缺失/冲突预览 → 复核 → 仅补缺失\n独立 SHA-256 验证；不改插件与用户数据"]
     API --> MT["Maintenance\n预览令牌、停止应用、固定宿主与共享依赖"]
     MT --> CP["CheckpointFiles\n内容去重检查点、叶子级恢复、未知改动停止"]
-    MT --> INSTALL["还原旧层 → 官方安装器 → 首次运行验证\n普通差异 / purge 专用适配 → 恢复原组合"]
+    MT --> INSTALL["还原旧层 → 固定源构建授权 → 官方安装器\n首次运行与可逆记录验证 → 恢复原组合"]
+    MT --> LINK["外部来源切换\n验证检查点后移除链接本身，保留源码"]
+    LINK --> INSTALL
     CP --> CS
     API --> GC["CacheGC\n从组合、历史、方案、备份和恢复点标记引用"]
     GC --> SWEEP["复核预览 → 校验无引用对象 → 宽限期后回收"]
@@ -40,12 +70,17 @@ flowchart TB
     SP --> J["switch.json\n持久事务游标、提交标记、故障恢复"]
     J --> REC["撤销前核对程序和归档位置\n按游标推演合法移动，未知更新保留日志"]
     FV --> VC["VerifiedContentCache\n可丢弃的本机 NTFS 哈希缓存"]
+    VC --> IDENT["按物理文件身份串行校验\n硬链接共用 CLOSE 屏障；其他文件并行"]
     VS --> VC
     FV --> TC["TreeCheckpoints\n按目录身份保存已验证索引"]
     TC --> USN["NtfsJournal\nCLOSE 屏障 + 连续变更日志\n断档回退全量"]
     TC --> IDX["日志验证后复用路径、子目录索引与指纹\n每个目录最多两个位置；预演隔离"]
     TC --> VC
     VS --> CS["ContentStore\n按内容寻址的对象与双向恢复副本"]
+    VS --> IO["包、依赖与恢复副本\n最多 8 路校验；主线程报告真实计数"]
+    CP --> IO
+    IO --> CS
+    CS --> DEDUP["先验证内容，再复用已有对象\n不为重复副本写临时文件和 fsync"]
     PM --> CS
     API --> OP["OperationLog\n独立锁、真实阶段和计数"]
     OP --> UI
@@ -61,7 +96,7 @@ flowchart TB
 
 ## Verification principle / 校验原理图
 
-![当前校验分支与 NTFS 缓存原理图](images/verification-principle-0.4.0.svg)
+![当前校验分支与 NTFS 缓存原理图](images/verification-principle-0.4.3.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
@@ -117,6 +152,9 @@ flowchart TD
     MAINT["用户明确发起维护 / 清理"] --> REVIEW["只读预览 + 版本令牌"]
     REVIEW --> MUTEX["独占维护锁；重新验证宿主、目标与其他依赖"]
     MUTEX --> SAVE["保存 before 内容检查点与持久日志"]
+    SAVE --> PAR["枚举后有限并发读取\n每个文件独立校验；保存实际进度"]
+    PAR --> BLOB["源文件 SHA-256 与已有副本双校验\n同内容复用；新内容原子写入"]
+    PAR --> ALIAS["同一文件的硬链接别名\n加身份锁后重读 USN，再校验并关闭周期"]
     SAVE --> APPLY["还原旧补丁、安装或移除包、独立验证结果"]
     APPLY --> SEALED["封存 expected 内容；保留恢复历史"]
     SEALED --> RESTORE{"恢复时仍匹配 expected 或已恢复条目？"}

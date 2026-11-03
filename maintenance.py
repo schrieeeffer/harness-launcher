@@ -530,7 +530,8 @@ class Maintenance:
                     if actual not in allowed:
                         raise LauncherError('恢复期间官方归档被更新，已停止。', code='host_identity_changed')
             report_progress('sync', '恢复已核验的插件与配置文件')
-            files.restore(before, expected, guard)
+            files.restore(before, expected, guard,
+                          progress=lambda label, done, total: report_progress('sync', label, done, total, unit='entries'))
             report_progress('launch', '核对宿主并保存恢复结果')
             self.check_host(pending)
             self.manager.settings = json.loads(self.manager.settings_file.read_bytes())

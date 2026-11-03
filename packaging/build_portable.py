@@ -51,8 +51,11 @@ def build():
         shutil.copyfile(ROOT / filename, stage / filename)
     shutil.copytree(ROOT / 'ui', stage / 'ui')
     shutil.copytree(ROOT / 'docs', stage / 'docs')
-    for name in ('README.md', 'README.en.md', 'LICENSE', 'CHANGELOG.md'):
+    for name in ('README.md', 'README.en.md', 'LICENSE', 'CHANGELOG.md',
+                 'MAINTENANCE.md', 'MAINTENANCE.en.md', 'CONTRIBUTING.md', 'SECURITY.md'):
         shutil.copyfile(ROOT / name, stage / name)
+    (stage / 'packaging').mkdir()
+    shutil.copyfile(ROOT / 'packaging/README.md', stage / 'packaging/README.md')
     quickstart = '''Harness Launcher 0.4.3 — Windows 10/11 64 位便携版
 
 1. 先安装并至少打开一次 DeepSeek Harness 官方桌面版。

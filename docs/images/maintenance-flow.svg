@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="610" viewBox="0 0 960 610" role="img" aria-labelledby="title desc">
+<title id="title">插件维护与恢复流程</title>
+<desc id="desc">确认操作后保存检查点，只允许目标插件构建，调用官方安装器。校验通过后保存记录，失败时从检查点恢复。缓存只清理无引用内容。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10Z" fill="#63708a"/></marker></defs>
+<rect width="960" height="610" rx="20" fill="#f5f7fc"/>
+<g font-family="Segoe UI,Microsoft YaHei,sans-serif" fill="#17223b">
+<text x="40" y="48" font-size="25" font-weight="600">一次插件维护，留下一个恢复点</text>
+<text x="40" y="78" font-size="15" fill="#52627b">更新、卸载与重新验证共用流程；普通插件使用通用记录，purge 归档由专用适配器处理。</text>
+<g stroke="#d6def0" fill="#fff" stroke-width="1.5"><rect x="40" y="110" width="260" height="100" rx="12"/><rect x="350" y="110" width="260" height="100" rx="12"/><rect x="660" y="110" width="260" height="100" rx="12"/><rect x="660" y="265" width="260" height="110" rx="12"/><rect x="350" y="265" width="260" height="110" rx="12"/><rect x="40" y="265" width="260" height="110" rx="12"/><rect x="350" y="445" width="570" height="115" rx="12"/></g>
+<g stroke="#63708a" stroke-width="2" fill="none" marker-end="url(#arrow)"><path d="M300 160H345"/><path d="M610 160H655"/><path d="M790 210V260"/><path d="M660 320H615"/><path d="M350 320H305"/><path d="M790 375V440" stroke-dasharray="6 5"/><path d="M480 375V440" stroke-dasharray="6 5"/></g>
+<g font-size="20" font-weight="600"><text x="60" y="144">1. 查看说明并确认</text><text x="370" y="144">2. 保存维护检查点</text><text x="680" y="144">3. 调用官方安装器</text><text x="680" y="300">4. 恢复构建策略</text><text x="370" y="300">5. 校验维护结果</text><text x="60" y="300">6. 保存插件记录</text><text x="370" y="478">出现错误：保留现场，从检查点恢复</text></g>
+<g font-size="15" fill="#52627b"><text x="60" y="174">显示版本、来源与操作范围</text><text x="60" y="195">取消或关闭不会执行</text><text x="370" y="174">记录插件、配置与共享依赖</text><text x="370" y="195">相同内容复用已有副本</text><text x="680" y="174">仅授权选定版本或提交</text><text x="680" y="195">临时禁止其它插件构建</text><text x="680" y="330">恢复其它插件原来的策略</text><text x="680" y="352">保留目标安装器的有效改动</text><text x="370" y="330">检查文件与依赖</text><text x="370" y="352">更新后实际运行，再退出确认</text><text x="60" y="330">恢复更新前选中的组合</text><text x="60" y="352">卸载也保留恢复入口</text><text x="370" y="508">先核对检查点之后的变化，再恢复受管理文件。</text><text x="370" y="533">用户会话与工作区保留；存在冲突时列出原因。</text></g>
+<rect x="40" y="445" width="260" height="115" rx="12" fill="#eaf6f0"/>
+<text x="60" y="478" font-size="19" font-weight="600">缓存清理</text><text x="60" y="508" font-size="15" fill="#365b4b">一次枚举 → 标记引用 → 确认</text><text x="60" y="533" font-size="15" fill="#365b4b">恢复点引用的内容继续保留</text>
+</g></svg>
