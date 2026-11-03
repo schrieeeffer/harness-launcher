@@ -132,6 +132,27 @@ class ContentStore:
             raise StorageError('文件快照编号无效。') from exc
         return self._read('blobs/' + key, key)
 
+    def check_blob_inventory(self, keys):
+        """Check availability in one enumeration; never certify blob contents."""
+        try:
+            pending = {digest(key) for key in keys}
+        except DomainError as exc:
+            raise StorageError('文件快照编号无效。') from exc
+        if not pending:
+            return
+        try:
+            with os.scandir(self._path('blobs')) as entries:
+                for entry in entries:
+                    if entry.name in pending:
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISREG(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 0x400:
+                            pending.remove(entry.name)
+                        if not pending:
+                            return
+        except OSError as exc:
+            raise StorageError('文件快照缺失或无法读取。') from exc
+        raise StorageError('文件快照缺失或无法读取：' + sorted(pending)[0])
+
     def store_file(self, path, stamp, cached=None):
         path = Path(path)
         try:

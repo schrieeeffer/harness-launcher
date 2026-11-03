@@ -37,14 +37,18 @@ class TreeCheckpoints:
                 return
             envelope = json.loads(path.read_bytes())
             trees = envelope['trees']
-            if (envelope.get('format') != 3 or not isinstance(trees, dict)
+            if (envelope.get('format') != 4 or not isinstance(trees, dict)
                     or len(trees) > self.MAX_TREES
                     or hashlib.sha256(canonical(trees)).hexdigest() != envelope['checksum']):
                 return
             count = 0
             for key, tree in trees.items():
                 identity = tree['identity']
-                if (not self.numbers(identity, 3) or key != self.key(identity)
+                excluded = tree['excluded']
+                if (not isinstance(excluded, list) or excluded != sorted(set(excluded))
+                        or any(len(relative_path(n).parts) != 1 for n in excluded)):
+                    return
+                if (not self.numbers(identity, 3) or key != self.key(identity, excluded)
                         or not self.numbers(tree['checkpoint'], 2)):
                     return
                 entries = tree['entries']
@@ -56,6 +60,8 @@ class TreeCheckpoints:
                 names = set()
                 for name, entry in entries.items():
                     relative_path(name, allow_root=True)
+                    if name.split('/')[0] in excluded:
+                        return
                     if name.casefold() in names:
                         return
                     names.add(name.casefold())
@@ -65,6 +71,7 @@ class TreeCheckpoints:
                     if type(entry.get('proof_usn')) is not int or entry['proof_usn'] < 0:
                         return
                     if entry['type'] == 'file' and (not self.numbers(entry.get('stamp'), 3)
+                            or type(entry.get('executable')) is not bool
                             or not self.numbers(entry.get('ntfsIdentity'), 8)
                             or entry['ntfsIdentity'][0] != identity[0]
                             or entry['ntfsIdentity'][1] != entry['file_id']):
@@ -81,8 +88,9 @@ class TreeCheckpoints:
         return isinstance(value, (list, tuple)) and len(value) == count and all(type(v) is int and v >= 0 for v in value)
 
     @staticmethod
-    def key(identity):
-        return ':'.join(map(str, identity))
+    def key(identity, excluded=()):
+        key = ':'.join(map(str, identity))
+        return key + ':omit:' + hashlib.sha256(canonical(list(excluded))).hexdigest() if excluded else key
 
     def safe_path(self):
         return ContentStore(self.path.parent)._path(self.path.name)
@@ -131,11 +139,14 @@ class TreeCheckpoints:
                             if entry['type'] == 'file' else dict(entry))
         return result
 
-    def begin(self, root):
+    def begin(self, root, excluded=()):
         """Return (reusable entries, candidate checkpoint) for one real root."""
+        excluded = sorted(set(excluded))
+        if any(len(relative_path(n).parts) != 1 for n in excluded):
+            raise PatchError('目录检查点只能排除直接子项。')
         try:
             identity = self.journal.root_identity(root)
-            key = self.key(identity)
+            key = self.key(identity, excluded)
             tree = self.trees.get(key)
             if tree:
                 try:
@@ -153,14 +164,14 @@ class TreeCheckpoints:
                 self.dirty = True
             checkpoint = self.journal.checkpoint(root)
             self.misses += 1
-            return None, (identity, checkpoint)
+            return None, (identity, checkpoint, excluded)
         except (OSError, JournalUnavailable):
             # Never advance a cursor past an event we could not account for.
             return None, None
 
     def seal(self, root, candidate, entries):
         """Publish only a fully verified, quiet directory; never a virtual view."""
-        identity, checkpoint = candidate
+        identity, checkpoint, excluded = candidate
         files = [entry for entry in entries.values() if entry['type'] == 'file']
         if len(files) < self.MIN_FILES or len(entries) > self.MAX_ENTRIES:
             return
@@ -182,9 +193,10 @@ class TreeCheckpoints:
             return
         saved = {path.relative_to(root).as_posix(): {k: v for k, v in entry.items() if k != 'source'}
                  for path, entry in entries.items()}
-        key = self.key(identity)
+        key = self.key(identity, excluded)
         self.trees.pop(key, None)
-        self.trees[key] = {'identity': identity, 'checkpoint': cursor, 'entries': saved, 'ids': ids}
+        self.trees[key] = {'identity': identity, 'checkpoint': cursor, 'entries': saved,
+                           'ids': ids, 'excluded': excluded}
         self.projections.pop(key, None)
         while len(self.trees) > self.MAX_TREES or sum(len(t['entries']) for t in self.trees.values()) > self.MAX_ENTRIES:
             self.trees.pop(next(iter(self.trees)))
@@ -196,7 +208,7 @@ class TreeCheckpoints:
             return
         try:
             trees = {key: {k: v for k, v in tree.items() if k != 'ids'} for key, tree in self.trees.items()}
-            envelope = {'format': 3, 'trees': trees, 'checksum': hashlib.sha256(canonical(trees)).hexdigest()}
+            envelope = {'format': 4, 'trees': trees, 'checksum': hashlib.sha256(canonical(trees)).hexdigest()}
             atomic_write(self.safe_path(), canonical(envelope))
             self.dirty = False
         except (OSError, ValueError, PatchError):

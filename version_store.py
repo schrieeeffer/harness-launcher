@@ -16,6 +16,7 @@ import time
 from patch_modes import PatchError, archive_file, file_hash, sha
 from domain import ContentIdentity, DomainError
 from operations import report_progress
+from file_view import FileView
 
 
 NAME = re.compile(r'^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_][a-zA-Z0-9_.-]*$')
@@ -77,6 +78,8 @@ class VersionStore:
 
     def files(self, root, store=True):
         """Capture installed code, not user data; reject ambiguous nested links."""
+        if not store:
+            return self.verified_files(root)
         result, files = {}, {}
         def visit(directory):
             with os.scandir(directory) as scanned:
@@ -110,6 +113,34 @@ class VersionStore:
         for child, entry in self.checked_items(files, read, ('保存' if store else '校验') + '插件文件：' + root.name):
             result[files[child][0]] = entry
         return result
+
+    def verified_files(self, root):
+        """Recheck package topology with a journal-certified package inventory.
+
+        node_modules is resolved through explicit dependency edges by capture().
+        Exclusions are part of the checkpoint identity, so this inventory cannot
+        satisfy a whole-tree check. Root events also catch new top-level files.
+        """
+        root = Path(root)
+        before = root.lstat()
+        if not stat.S_ISDIR(before.st_mode) or getattr(before, 'st_file_attributes', 0) & 0x400:
+            raise PatchError('插件根目录不是普通目录：' + str(root))
+        excluded = ('node_modules',) if (root / 'node_modules').is_dir() else ()
+        view = FileView([root], verification_cache=self.verification_cache, exclude_names=excluded)
+        for path, entry in view.entries.items():
+            if entry['type'] == 'link':
+                raise PatchError('插件代码含嵌套链接，无法建立完整版本记录：' + str(path))
+        view.hash_files(progress=lambda done, total: report_progress(
+            None, '校验插件文件：' + root.name, done, total))
+        after = root.lstat()
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+        if (identity(before) != identity(after) or not stat.S_ISDIR(after.st_mode)
+                or getattr(after, 'st_file_attributes', 0) & 0x400):
+            raise PatchError('读取期间插件目录发生变化：' + str(root))
+        return {path.relative_to(root).as_posix():
+                ({'type': 'file', 'hash': entry['hash'], 'size': entry['size'],
+                  'executable': entry['executable']} if entry['type'] == 'file' else {'type': 'dir'})
+                for path, entry in view.entries.items() if path != root}
 
     def resolve_dependency(self, root, name):
         if not isinstance(name, str) or not NAME.fullmatch(name):
@@ -225,13 +256,13 @@ class VersionStore:
             'version': state['pluginVersion'], 'package': package, 'patch': self.adapter_patch(state)})
         return dict(state, package=package, revision=revision)
 
-    def verify_adapter(self, state, adapter, *, installed=True):
+    def verify_adapter(self, state, adapter, *, installed=True, recovery=True):
         revision = self.store.read_object(state['revision'])
         if (revision.get('adapter') != adapter or revision['package'] != state['package']
                 or revision['patch'] != self.adapter_patch(state)):
             raise PatchError('内置补丁记录与不可变版本不一致。')
         if installed:
-            self.verify_package(adapter, state['package'])
+            self.verify_package(adapter, state['package'], recovery=recovery)
 
     def package_snapshot(self, name, source=''):
         capsule = self.capture(name, source)
@@ -242,23 +273,34 @@ class VersionStore:
         self.verify_blobs(capsule)
         return self.object('packages', capsule)
 
-    def verify_blobs(self, capsule):
+    @staticmethod
+    def blob_keys(capsule):
         keys = {entry['hash'] for package in capsule['packages'].values()
                 for entry in package['files'].values() if entry['type'] == 'file'}
         keys.update(capsule.get('installMetadata', {}).values())
+        return keys
+
+    def verify_blobs(self, capsule):
+        keys = self.blob_keys(capsule)
         # Same content may occur in several packages; verify each blob once in
         # this pass, with no persistent trust based on timestamps.
         for _ in self.checked_items(keys, lambda key: bool(self.store.blob_bytes(key)), '校验恢复副本'):
             pass
 
-    def verify_package(self, name, reference):
+    def verify_package(self, name, reference, *, recovery=True):
         expected = self.store.read_object(reference)
         actual = self.capture(name, expected.get('source', ''), store=False, metadata=False)
         if actual != {k: v for k, v in expected.items() if k != 'installMetadata'}:
             raise PatchError('插件或依赖内容与版本记录不同，旧补丁不能用于更新后的插件：' + name,
                 code='plugin_identity_changed', details={'plugin': name},
                 recovery='保留记录；先恢复记录对应的插件包及依赖，再从“升级 / 重新记录”开始。仅修改版本号或清空缓存不能恢复旧基线。')
-        self.verify_blobs(expected)
+        if recovery:
+            self.verify_blobs(expected)
+        else:
+            # Keep missing recovery data a preflight error. Package bytes are
+            # not rewritten by a layer switch; used patch blobs are hashed by
+            # the transaction planner and package restores use verify_blobs().
+            self.store.check_blob_inventory(self.blob_keys(expected))
 
     def verify_external_source(self, name, reference, root):
         """Read-only check before restoring a local link; never overwrite its project."""

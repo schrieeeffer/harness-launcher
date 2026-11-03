@@ -68,11 +68,11 @@ class SwitchPlan:
         lock = self.tracker.versions.lock(selection, plugins, old, host)
         if any(combination.get(key) != value for key, value in lock.items()):
             raise PatchError('当前组合的版本记录已变化，请刷新并重新应用选择。')
-        self.tracker.check_versions(plugins, selection)
+        self.tracker.check_versions(plugins, selection, recovery=False)
         if self.core.adapter.plugin in selection:
             if not core_state:
                 return False
-            self.tracker.versions.verify_adapter(core_state, self.core.adapter.plugin)
+            self.tracker.versions.verify_adapter(core_state, self.core.adapter.plugin, recovery=False)
         report_progress('files', '校验当前组合文件')
         view = self.file_view(self.tracker.scopes.values())
         actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes,
@@ -462,7 +462,7 @@ class SwitchPlan:
             if not self.verify_current(previous['selection'], plugins,
                                        self.core.bytes(previous['manifestHash'])):
                 raise PatchError('当前组合已变化，未修改加载配置，请刷新重试。')
-        self.tracker.check_versions(plugins, plan['selection'])
+        self.tracker.check_versions(plugins, plan['selection'], recovery=False)
         if self.tracker.versions.hash(Path(self.manager.settings['executable'])) != plan['host']:
             raise PatchError('Harness 在预检后发生更新，未开始切换。')
         inputs = self.file_view([self.manager.manifest_path] if configuration_only else

@@ -14,8 +14,13 @@ from domain import DomainError, SnapshotEntry
 
 
 class FileView:
-    def __init__(self, roots, hashes=None, verification_cache=None):
+    def __init__(self, roots, hashes=None, verification_cache=None, *, exclude_names=()):
         self.roots = [Path(root) for root in roots]
+        from domain import relative_path
+        excluded = sorted(set(exclude_names))
+        if any(len(relative_path(n).parts) != 1 for n in excluded):
+            raise PatchError('预检只能排除根目录的直接子项。')
+        self.excluded_paths = {root / name for root in self.roots for name in excluded}
         self.entries = {}
         self.hashes = {} if hashes is None else hashes
         self.verification_cache = verification_cache
@@ -35,7 +40,7 @@ class FileView:
                     continue
                 if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
                     raise PatchError('预检根目录的上级路径不能经过链接：' + str(parent))
-            cached, candidate = self.checkpoints.begin(root) if self.checkpoints else (None, None)
+            cached, candidate = self.checkpoints.begin(root, excluded) if self.checkpoints else (None, None)
             if cached is not None:
                 self.entries.update(cached)
                 cached_paths.update(cached)
@@ -58,6 +63,7 @@ class FileView:
     def __deepcopy__(self, memo):
         clone = object.__new__(type(self))
         clone.roots = list(self.roots)
+        clone.excluded_paths = set(self.excluded_paths)
         # Paths and scalar identities are immutable. Copying Path objects for
         # every overlay branch needlessly reparses tens of thousands of paths.
         clone.entries = {path: dict(entry, stamp=list(entry['stamp'])) if 'stamp' in entry else dict(entry)
@@ -99,11 +105,14 @@ class FileView:
                     for child in children:
                         # On Windows this reuses enumeration metadata instead
                         # of opening every child for exists() and lstat().
-                        self._capture(Path(child.path), child.stat(follow_symlinks=False))
+                        child_path = Path(child.path)
+                        if child_path not in self.excluded_paths:
+                            self._capture(child_path, child.stat(follow_symlinks=False))
             except OSError as exc:
                 raise PatchError('预检期间目录发生变化或无法读取：' + str(path)) from exc
         elif stat.S_ISREG(info.st_mode):
             entry = {'type': 'file', 'size': info.st_size, 'mtime': info.st_mtime_ns,
+                     'executable': bool(info.st_mode & stat.S_IXUSR),
                      'stamp': [info.st_size, info.st_mtime_ns, info.st_ctime_ns], 'source': path}
         else:
             raise PatchError('预检遇到不支持的文件类型：' + str(path))

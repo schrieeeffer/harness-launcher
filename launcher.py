@@ -473,7 +473,9 @@ class Manager:
             raise PatchError('这些插件缺少安装前记录，无法可靠切换文件组合：' + '、'.join(unknown) +
                              '。请先恢复干净的安装，再通过启动器安装并自动记录；不能用安装后的快照补记。')
         report_progress('packages', '校验插件版本与依赖文件')
-        tracker.check_versions(plugins, selection)
+        # Switching layers does not reinstall packages. The planner verifies
+        # every forward/reverse patch blob that this transaction actually uses.
+        tracker.check_versions(plugins, selection, recovery=False)
         planner = SwitchPlan(tracker)
         plan = planner.prepare(selection, plugins, before, after, native)
         return planner.execute(plan)

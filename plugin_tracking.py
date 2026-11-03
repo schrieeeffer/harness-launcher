@@ -403,7 +403,7 @@ class PluginTracking:
             if changed:
                 raise TrackingError('记录窗口外发生了文件变化，无法自动归属，已停止覆盖：' + '、'.join(sorted(changed)[:4]))
 
-    def check_versions(self, plugins, selection):
+    def check_versions(self, plugins, selection, *, recovery=True):
         records = self.load()['records']
         available = {p['id']: p['version'] for p in plugins}
         for plugin, record in records.items():
@@ -414,7 +414,7 @@ class PluginTracking:
                     code='plugin_identity_changed', details={'plugin': plugin},
                     recovery='保留现有记录。若已在记录窗口外更新，请先恢复记录对应的插件及依赖，再从“升级 / 重新记录”开始；不能对更新后的文件补记旧基线。')
             if (record['enabled'] or plugin in selection) and record.get('package'):
-                self.versions.verify_package(plugin, record['package'])
+                self.versions.verify_package(plugin, record['package'], recovery=recovery)
         host_hash = None
         for name, record in records.items():
             if (record['enabled'] or name in selection) and record.get('hostHash'):
@@ -429,12 +429,12 @@ class PluginTracking:
         if raw != manifest:
             raise TrackingError('启动前加载组合发生变化，未打开 Harness。', code='revision_conflict', retryable=True)
         plugins = self.manager.discover(obj, bundles)
-        self.check_versions(plugins, selection)
+        self.check_versions(plugins, selection, recovery=False)
         if self.core.adapter.plugin in selection:
             state = self.core.load()
             if state is None:
                 raise TrackingError('启动前缺少内置插件的版本记录。')
-            self.versions.verify_adapter(state, self.core.adapter.plugin)
+            self.versions.verify_adapter(state, self.core.adapter.plugin, recovery=False)
         if self.manager.manifest_path.read_bytes() != manifest:
             raise TrackingError('启动前加载配置再次发生变化，未打开 Harness。', code='revision_conflict', retryable=True)
 
