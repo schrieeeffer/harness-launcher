@@ -69,8 +69,8 @@ class CurrentLaunchTests(unittest.TestCase):
     def test_change_during_validation_is_not_launched(self):
         self.seal()
         original = self.manager.tracking.check_versions
-        def change(*args):
-            original(*args)
+        def change(*args, **kwargs):
+            original(*args, **kwargs)
             self.path.write_bytes(self.path.read_bytes() + b' ')
         with patch.object(self.manager.tracking, 'check_versions', side_effect=change), \
                 patch('launcher.subprocess.Popen') as spawn, self.assertRaisesRegex(MenuError, '校验期间配置'):

@@ -161,7 +161,16 @@ class OfficialUpdate:
         runtime = Path(self.manager.settings['executable']).parent / 'resources/runtime'
         entries = {n.removeprefix('resources/runtime/'): e for n, e in value['files'].items()
                    if n.startswith('resources/runtime/')}
-        view = FileView([runtime], verification_cache=self.manager.verification_cache)
+        repair.safe_path(runtime)
+        try:
+            with os.scandir(runtime) as children:
+                roots = [Path(child.path) for child in children if child.name != 'cli']
+        except FileNotFoundError:
+            roots = [runtime]
+        # CLI belongs to the switch planner. Its independent close barriers
+        # must not invalidate a checkpoint covering every other runtime file.
+        # Enumerate top-level entries each time, then certify disjoint trees.
+        view = FileView(roots, verification_cache=self.manager.verification_cache)
         # Include generated files when sealing the directory checkpoint. A
         # partial inventory cannot prove the tree unchanged on the next run.
         view.hash_files(progress=lambda n, total: report_progress('files', '复核已知官方运行时（复用目录检查点）', n, total))
