@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def check_service(python, application_root):
     """Also used when checking an extracted portable build with its own Python."""
     with tempfile.TemporaryDirectory(prefix='launcher-entry-') as folder:
-        root = Path(folder)
+        # Windows CI may spell TEMP with an 8.3 alias (for example RUNNER~1).
+        # Manager resolves installation paths, so use the same physical root.
+        root = Path(folder).resolve()
         data = root / 'launcher-data'
         home = root / 'harness-profile'
         executable = root / 'fake-install/DeepSeek Harness.exe'
@@ -55,8 +57,8 @@ def check_service(python, application_root):
                 with opener.open(request, timeout=5) as response:
                     assert json.load(response)['current'] is None
                 settings = json.loads((data / 'settings.json').read_text(encoding='utf-8'))
-                assert Path(settings['home']) == home
-                assert Path(settings['executable']) == executable
+                assert Path(settings['home']) == home, (settings['home'], str(home))
+                assert Path(settings['executable']) == executable, (settings['executable'], str(executable))
                 request = urllib.request.Request(base + '/api/quit', data=b'{}',
                     headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
                 with opener.open(request, timeout=5) as response:
