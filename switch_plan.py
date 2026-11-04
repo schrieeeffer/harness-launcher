@@ -278,11 +278,18 @@ class SwitchPlan:
         previous_value = self.tracker.read_object(previous_baseline) if previous_baseline else None
         reuse_baseline = bool(isinstance(previous_value, dict)
                               and all(previous_value.get(key) == value for key, value in baseline.items()))
+        def program_state(state):
+            return {key: entry for key, entry in state.items()
+                    if key.split('|', 1)[0] not in self.tracker.USER_SCOPES}
+        same_program = bool(isinstance(previous_value, dict)
+                            and all(previous_value.get(key) == value for key, value in baseline.items() if key != 'state')
+                            and program_state(previous_value.get('state', {})) == program_state(baseline_state))
         if native_view.is_file(self.core.archive):
-            if reuse_baseline and 'archiveInfo' in previous_value:
+            if same_program and 'archiveInfo' in previous_value:
                 # Archive and unpacked bytes have just been hashed against the
                 # sealed baseline. Re-parsing every ASAR member proves nothing
-                # additional when the complete content identities are equal.
+                # additional when program content identities are equal. User
+                # settings do not change the archive or its unpacked members.
                 baseline['archiveInfo'] = previous_value['archiveInfo']
             else:
                 report_progress('files', '验证官方归档内容')

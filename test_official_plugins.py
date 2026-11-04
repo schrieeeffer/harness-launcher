@@ -125,3 +125,23 @@ class OfficialPluginTests(unittest.TestCase):
         with patch.object(self.manager, 'spawn_harness') as spawn, self.assertRaises((MenuError, PatchError)):
             self.apply(['@local/created'], launch=True)
         spawn.assert_not_called()
+
+    def test_user_settings_do_not_revalidate_unchanged_archive_members(self):
+        self.apply([])
+        self.begin('ordinary-b')
+        self.install_fixture('ordinary-b')
+        rule = self.home / 'rules' / 'ordinary-b.md'
+        rule.parent.mkdir(exist_ok=True)
+        rule.write_bytes(b'plugin-owned rule')
+        self.accept()
+        self.apply([])
+        tracker = self.manager.tracking
+        before = dict(tracker.load()['nativeBaselines'])
+        config = self.profile / 'cordis.patch.yml'
+        config.write_bytes(b'# changed by official settings UI\n[]\n')
+        with patch('switch_plan.archive_info', side_effect=AssertionError('redundant archive validation')):
+            self.apply(['ordinary-b'])
+        self.assertEqual(config.read_bytes(), b'# changed by official settings UI\n[]\n')
+        self.assertNotEqual(tracker.load()['nativeBaselines'], before)
+        for reference in before.values():
+            self.assertIsInstance(tracker.read_object(reference), dict)
