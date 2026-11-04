@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Organize the backend into the `harness_launcher` package, grouped by application, domain, plugins, host, storage and verification responsibilities. Move regression tests into `tests/` and Windows launch helpers into `scripts/`.
+- Use `python -m harness_launcher` for source and portable entry points. Update CI discovery, the portable file allowlist and resource paths together; keep existing user data and recovery formats.
+- Add a bilingual development guide with a directory map, common change locations and focused test commands. Allow separate portable test builds with `--output-dir` while reusing the verified runtime download.
+
 ## 0.4.4 — everyday startup and official plugin coexistence
 
 - Keep adapter build scripts disabled during ordinary official plugin installs. Explicit adapter maintenance temporarily authorizes only its pinned source, then restores isolation.

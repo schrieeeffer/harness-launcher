@@ -213,17 +213,30 @@ Get-FileHash .\Harness-Launcher-0.4.4-Windows-x64.zip -Algorithm SHA256
 
 ## 源码运行与开发
 
-源码需要 Python 3.12+，运行时只使用标准库。Windows 上可双击 `launch.vbs`，也可以执行：
+源码按后端、界面、测试和打包分开存放：
+
+```text
+harness_launcher/   后端：app、domain、plugins、host、storage、verification
+ui/                 浏览器界面
+tests/              Python 回归测试；ui/ 下是前端测试
+scripts/            Windows 启动辅助脚本
+packaging/          便携包构建与 EXE 入口
+docs/               使用、设计、开发文档与截图
+```
+
+具体模块职责和常见改动位置见[开发与维护指南](docs/development.md)。
+
+源码需要 Python 3.12+，运行时只使用标准库。Windows 上可双击 `launch.vbs`，也可以在仓库根目录执行：
 
 ```powershell
-python launcher.py
+python -m harness_launcher
 ```
 
 有 Edge 时会打开独立应用窗口，否则使用默认浏览器。前端测试需要 Node.js，构建便携包需要 Windows 自带的 .NET Framework 编译器。
 
 ```powershell
-python -m unittest discover -v
-node --test test_ui.cjs
+python -m unittest discover -s tests -t . -v
+node --test tests/ui/test_ui.cjs
 python packaging/build_portable.py
 ```
 
@@ -240,7 +253,7 @@ python packaging/build_portable.py
 | [插件维护指南](docs/plugin-maintenance.md) | 更新、卸载、恢复点与缓存清理 |
 | [架构与原理图](docs/architecture.md) | 模块关系、官方更新和文件校验流程 |
 | [补丁记录原理](docs/patch-recording.md) | 安装前后差异与回退范围 |
-| [维护手册](MAINTENANCE.md) | 开发和排障入口 |
+| [维护手册](docs/development.md) | 开发和排障入口 |
 | [版本说明](CHANGELOG.md) | 当前版本改动 |
 
 欢迎按[贡献规范](CONTRIBUTING.md)提交问题和修改，安全问题请参阅[安全说明](SECURITY.md)。

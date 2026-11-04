@@ -13,10 +13,10 @@ internal static class Launcher {
         try {
             string root = AppDomain.CurrentDomain.BaseDirectory;
             string python = Path.Combine(root, "runtime", "pythonw.exe");
-            string script = Path.Combine(root, "launcher.py");
+            string script = Path.Combine(root, "harness_launcher", "__main__.py");
             if (!File.Exists(python) || !File.Exists(script))
                 throw new IOException("请先把 ZIP 完整解压到一个文件夹，再双击 Harness Launcher.exe。不要只复制 exe，也不要直接在压缩包中运行。");
-            var start = new ProcessStartInfo(python, "-B \"" + script + "\"");
+            var start = new ProcessStartInfo(python, "-B -m harness_launcher");
             start.WorkingDirectory = root;
             start.UseShellExecute = false;
             start.CreateNoWindow = true;

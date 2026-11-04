@@ -3,10 +3,12 @@
 Downloads CPython from python.org and checks the release page's SHA-256 before
 extracting or executing it. No user's Harness files or launcher data are bundled.
 """
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import urllib.request
@@ -14,24 +16,40 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.4.4'
+VERSION = runpy.run_path(str(ROOT / 'harness_launcher/__init__.py'))['__version__']
 PYTHON = '3.13.17'
 RUNTIME_SHA = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
-MODULES = '''adapters bootstrap.ps1 cache_gc catalog domain errors file_view host_modules install_sources installer_policy launch.vbs launcher maintenance
-maintenance_files ntfs_journal official_host official_package official_update operation_models operations patch_modes plugin_tracking
-profile_config recording_state runtime_context runtime_integrity runtime_repair settings_store storage switch_plan tree_checkpoint update_check
-verification_cache version_store'''.split()
+PACKAGE_MODULES = '''__init__ __main__
+app.__init__ app.launcher app.operations app.runtime_context app.switch_plan
+domain.__init__ domain.models domain.errors domain.operation_models domain.recording_state
+plugins.__init__ plugins.catalog plugins.install_sources plugins.installer_policy plugins.plugin_tracking plugins.maintenance plugins.update_check
+host.__init__ host.adapters host.patch_modes host.host_modules host.profile_config host.official_host host.official_package host.official_update host.runtime_integrity host.runtime_repair
+storage.__init__ storage.content_store storage.version_store storage.maintenance_files storage.settings_store storage.cache_gc
+verification.__init__ verification.file_view verification.ntfs_journal verification.tree_checkpoint verification.verification_cache'''.split()
 
 
-def build():
-    dist = ROOT / 'dist'
-    dist.mkdir(exist_ok=True)
+def source_files():
+    """Explicit runtime allowlist; fail when a new module has not been packaged."""
+    package_files = {Path('harness_launcher') / (name.replace('.', '/') + '.py') for name in PACKAGE_MODULES}
+    actual = {path.relative_to(ROOT) for path in (ROOT / 'harness_launcher').rglob('*.py')}
+    if actual != package_files:
+        missing = sorted(str(path) for path in package_files - actual)
+        unlisted = sorted(str(path) for path in actual - package_files)
+        raise RuntimeError(f'Package allowlist mismatch: missing={missing}, unlisted={unlisted}')
+    return sorted(package_files | {Path('launch.vbs'), Path('scripts/bootstrap.ps1')})
+
+
+def build(output_dir=None):
+    files = source_files()
+    dist = Path(output_dir).resolve() if output_dir else ROOT / 'dist'
+    dist.mkdir(parents=True, exist_ok=True)
     target = dist / ('Harness-Launcher-' + VERSION + '-Windows-x64')
-    # Never recursively remove a computed directory. A fresh temporary build
-    # directory becomes the versioned artifact after every verification passes.
+    # Keep each staging directory available for inspection after the build.
     import tempfile
     stage = Path(tempfile.mkdtemp(prefix='portable-', dir=dist))
-    runtime_zip = dist / ('python-' + PYTHON + '-embed-amd64.zip')
+    cache = ROOT / 'dist'
+    cache.mkdir(exist_ok=True)
+    runtime_zip = cache / ('python-' + PYTHON + '-embed-amd64.zip')
     if not runtime_zip.exists():
         with urllib.request.urlopen('https://www.python.org/ftp/python/' + PYTHON + '/' + runtime_zip.name,
                                     timeout=60) as response:
@@ -46,17 +64,18 @@ def build():
                 raise RuntimeError('Unexpected runtime archive path')
         archive.extractall(runtime)
     (runtime / 'python313._pth').write_text('python313.zip\n.\n..\n', encoding='utf-8')
-    for module in MODULES:
-        filename = module if '.' in module else module + '.py'
-        shutil.copyfile(ROOT / filename, stage / filename)
+    for filename in files:
+        destination = stage / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / filename, destination)
     shutil.copytree(ROOT / 'ui', stage / 'ui')
     shutil.copytree(ROOT / 'docs', stage / 'docs')
     for name in ('README.md', 'README.en.md', 'LICENSE', 'CHANGELOG.md',
-                 'MAINTENANCE.md', 'MAINTENANCE.en.md', 'CONTRIBUTING.md', 'SECURITY.md'):
+                 'CONTRIBUTING.md', 'SECURITY.md'):
         shutil.copyfile(ROOT / name, stage / name)
     (stage / 'packaging').mkdir()
     shutil.copyfile(ROOT / 'packaging/README.md', stage / 'packaging/README.md')
-    quickstart = '''Harness Launcher 0.4.4 — Windows 10/11 64 位便携版
+    quickstart = f'''Harness Launcher {VERSION} — Windows 10/11 64 位便携版
 
 1. 先安装并至少打开一次 DeepSeek Harness 官方桌面版。
 2. 将本 ZIP 完整解压到你自己的文件夹，例如 D:\\Apps\\HarnessLauncher。
@@ -89,7 +108,10 @@ def build():
                     '/reference:System.Windows.Forms.dll', '/out:' + str(stage / 'Harness Launcher.exe'),
                     str(ROOT / 'packaging/Launcher.cs')], check=True)
     subprocess.run([str(runtime / 'python.exe'), '-B', '-c',
-        "import launcher,maintenance,cache_gc,runtime_repair,official_host,ssl; assert launcher.VERSION == '0.4.4'; print('Portable runtime imports OK')"],
+        "import ssl; from harness_launcher.app import launcher; "
+        "from harness_launcher.plugins import maintenance; from harness_launcher.storage import cache_gc; "
+        "from harness_launcher.host import runtime_repair, official_host; "
+        f"assert launcher.VERSION == {VERSION!r}; print('Portable runtime imports OK')"],
         cwd=stage, check=True)
     (stage / 'BUILD.json').write_text(json.dumps({'version': VERSION, 'python': PYTHON,
         'pythonDownloadSHA256': RUNTIME_SHA, 'sourceCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
@@ -107,4 +129,6 @@ def build():
 
 
 if __name__ == '__main__':
-    build()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output-dir', type=Path, help='Write a test build to a separate directory; reuse the verified runtime cache.')
+    build(parser.parse_args().output_dir)

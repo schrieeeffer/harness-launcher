@@ -6,19 +6,19 @@
 
 ### 开发环境
 
-项目目录、启动命令、离线备份恢复和 AI 交接提示词见 [维护说明](MAINTENANCE.md)。
+目录职责、常见改动位置、测试命令和数据恢复方法见 [开发与维护指南](docs/development.md)。
 
 使用 Python 3.12+ 和 Node.js 22+（Node 用于 JavaScript 语法检查和界面逻辑测试）。项目没有任何 pip 或 npm 依赖。
 
 提交前请运行：
 
 ```powershell
-python -m unittest discover -v
+python -m unittest discover -s tests -t . -v
 node --check ui/api.js
 node --check ui/state.js
 node --check ui/runtime.js
 node --check ui/app.js
-node --test test_ui.cjs
+node --test tests/ui/test_ui.cjs
 ```
 
 自动化测试使用临时目录、合成数据和模拟的公开接口，不操作真实 Harness 配置。真实插件验收在用户授权的安装中单独进行，保留恢复检查点，并记录版本、操作结果和耗时。
@@ -55,19 +55,19 @@ node --test test_ui.cjs
 
 ### Development setup
 
-See the [maintenance guide](MAINTENANCE.en.md) for project layout, startup commands, offline backup/restoration and an AI handoff prompt.
+See the [maintenance guide](docs/development.en.md) for directory responsibilities, common change locations, test commands and data recovery.
 
 Use Python 3.12+ and Node.js 22+ (Node runs JavaScript syntax checks and UI logic tests). There are no pip or npm dependencies.
 
 Before submitting, run:
 
 ```powershell
-python -m unittest discover -v
+python -m unittest discover -s tests -t . -v
 node --check ui/api.js
 node --check ui/state.js
 node --check ui/runtime.js
 node --check ui/app.js
-node --test test_ui.cjs
+node --test tests/ui/test_ui.cjs
 ```
 
 Automated tests use temporary folders, synthetic data and mocked public APIs without changing a real Harness profile. Run real-plugin acceptance separately on a user-authorized installation, keep recovery checkpoints, and record versions, results and timings.

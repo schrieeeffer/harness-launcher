@@ -140,17 +140,30 @@ When reporting an issue, include the Harness and plugin versions, the action you
 
 ## Development
 
-Source runs require Python 3.12+ and use the standard library. Double-click `launch.vbs` on Windows, or run:
+The repository separates backend code, browser assets, tests and distribution:
+
+```text
+harness_launcher/   Backend: app, domain, plugins, host, storage, verification
+ui/                 Browser assets
+tests/              Python regressions; frontend tests in ui/
+scripts/            Windows launch helpers
+packaging/          Portable builder and EXE entry point
+docs/               User, design and development guides; screenshots
+```
+
+See the [development guide](docs/development.en.md) for module responsibilities and where to make common changes.
+
+Source runs require Python 3.12+ and use the standard library. Double-click `launch.vbs` on Windows, or run from the repository root:
 
 ```powershell
-python launcher.py
+python -m harness_launcher
 ```
 
 Edge opens an app window when available; otherwise the default browser is used. Frontend tests require Node.js. Portable builds use the Windows .NET Framework compiler.
 
 ```powershell
-python -m unittest discover -v
-node --test test_ui.cjs
+python -m unittest discover -s tests -t . -v
+node --test tests/ui/test_ui.cjs
 python packaging/build_portable.py
 ```
 
@@ -163,7 +176,7 @@ The portable builder uses an explicit file allowlist and includes file hashes an
 - [Plugin test records](docs/validation-0.4.3.md)
 - [Installation sources](docs/install-sources.md) and [plugin maintenance](docs/plugin-maintenance.md)
 - [Architecture and diagrams](docs/architecture.md), [directory checkpoints](docs/checkpoint-design.md), and [patch recording](docs/patch-recording.md)
-- [Maintenance handbook](MAINTENANCE.en.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md), and [changelog](CHANGELOG.md)
+- [Maintenance handbook](docs/development.en.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md), and [changelog](CHANGELOG.md)
 
 ## License
 

@@ -23,15 +23,15 @@ This describes the 0.4.4 implementation. Runtime control data uses format 3.
 
 ![插件维护与恢复流程](images/maintenance-flow.svg)
 
-`installer_policy.py` 通过官方 pnpm 配置接口隔离构建脚本。普通非目标插件在维护期间临时禁止构建，结束后恢复原策略；适配器登记的特殊插件则持久禁用自动构建，只有显式维护时才临时授权固定来源。首次修改前备份原配置，写入后回读验证；保留其他包的策略。子进程超时且可能仍在写入时，交由维护恢复处理，避免并发改写。
+`plugins/installer_policy.py` 通过官方 pnpm 配置接口隔离构建脚本。普通非目标插件在维护期间临时禁止构建，结束后恢复原策略；适配器登记的特殊插件则持久禁用自动构建，只有显式维护时才临时授权固定来源。首次修改前备份原配置，写入后回读验证；保留其他包的策略。子进程超时且可能仍在写入时，交由维护恢复处理，避免并发改写。
 
-未经过启动器记录的普通插件标记为 `management: official`，由 Harness 管理源码、安装和启停。当前组合可直接启动，仍核对宿主、程序范围及活动补丁文件。它们停用后不再阻止其他已记录插件切换。用户配置范围按活动和目标补丁的路径归属检查；无关设置可变化，旧补丁重启时仍要求匹配其记录中的原始内容。新的用户配置基线保存为新对象，旧对象继续供恢复使用。`profile_config.py` 使用官方 YAML 解析器读取组件结构，不执行动态表达式；只递归组件组和插入项，模型及提供商配置作为组件自己的数据保留。程序与解包文件内容一致时，用户设置变化不会触发归档成员重复校验。
+未经过启动器记录的普通插件标记为 `management: official`，由 Harness 管理源码、安装和启停。当前组合可直接启动，仍核对宿主、程序范围及活动补丁文件。它们停用后不再阻止其他已记录插件切换。用户配置范围按活动和目标补丁的路径归属检查；无关设置可变化，旧补丁重启时仍要求匹配其记录中的原始内容。新的用户配置基线保存为新对象，旧对象继续供恢复使用。`host/profile_config.py` 使用官方 YAML 解析器读取组件结构，不执行动态表达式；只递归组件组和插入项，模型及提供商配置作为组件自己的数据保留。程序与解包文件内容一致时，用户设置变化不会触发归档成员重复校验。
 
 `CacheGC` 每次确认前先枚举一次对象名称，再遍历记录引用，避免为官方清单中的每个哈希反复访问文件系统。最终候选限定为此次枚举中的对象；确认执行时重新核对引用、路径与内容。扫描期间新建的对象留到后续清理。
 
 新增安装来源边界：`InstallSources` 只读检查 npm 发布元数据、Git 固定提交中的安装文件或本地构建入口，发放五分钟、绑定包名和来源的凭据。HTTP 开始安装前复核凭据，本地入口内容变化则拒绝；之后才交给 `Manager.begin_tracking` 执行宿主接续、快照与安装。普通启动和组合切换不调用远端来源检查。[界面流程与实测截图](install-sources.md)。
 
-`VersionStore` 对 Web 插件的 peer 依赖还检查官方前端静态模块注册表（`host_modules.py`）：仅识别从 HTML 入口加载、传给启动加载器的受支持字面量表，不执行 JavaScript。结果绑定前端清单、入口文件、HTML、ASAR 与 EXE 内容；未知结构不授权，更新后重新验证。状态轮询使用已发布的记录器及原子登记文件，不等待保存文件时的全局锁；实际写操作仍经过该锁。
+`VersionStore` 对 Web 插件的 peer 依赖还检查官方前端静态模块注册表（`host/host_modules.py`）：仅识别从 HTML 入口加载、传给启动加载器的受支持字面量表，不执行 JavaScript。结果绑定前端清单、入口文件、HTML、ASAR 与 EXE 内容；未知结构不授权，更新后重新验证。状态轮询使用已发布的记录器及原子登记文件，不等待保存文件时的全局锁；实际写操作仍经过该锁。
 
 ![当前模块架构图](images/architecture.svg)
 
@@ -190,19 +190,23 @@ own regression validation.
 
 ## Boundaries / 模块边界
 
+Python 路径相对 `harness_launcher/`；前端和打包路径相对仓库根目录。目录导航与开发命令见[开发与维护](development.md)。
+
+Python paths below are relative to `harness_launcher/`; UI and packaging paths are relative to the repository root. See the [development guide](development.en.md).
+
 | Layer / 层 | Modules / 模块 | Responsibility / 职责 |
 | --- | --- | --- |
-| Application / 应用编排 | `launcher.py`, `plugin_tracking.py` | HTTP、配置与安装流程；协调依赖，决定何时启动或保存 |
-| Domain / 领域规则 | `domain.py`, `recording_state.py`, `operation_models.py` | 文件身份、快照元信息、安装状态转换、事务命令解码；不执行 IO |
-| Planning and execution / 规划与执行 | `file_view.py`, `switch_plan.py`, `patch_modes.py` | 只读推演、输入复核、持久事务、执行与恢复 |
-| Adapter / 适配规则 | `adapters.py` | 插件专属路径、标记、归档位置和文件归属规则 |
-| Storage / 存储 | `storage.py`, `version_store.py`, `settings_store.py` | 原子写入、内容校验、包与依赖图、严格设置加载 |
-| Verification cache / 校验缓存 | `verification_cache.py`, `tree_checkpoint.py`, `ntfs_journal.py` | 连续日志保护的目录检查点与 NTFS 内容缓存；失效时完整校验，独立于恢复对象 |
-| Runtime context / 路径上下文 | `runtime_context.py` | 不可变安装路径；基础模块不通过 Manager 反向寻找依赖 |
-| Observability / 操作状态 | `operations.py`, `errors.py` | 有界操作记录、稳定错误代码、恢复建议 |
+| Application / 应用编排 | `app/launcher.py`, `plugins/plugin_tracking.py` | HTTP、配置与安装流程；协调依赖，决定何时启动或保存 |
+| Domain / 领域规则 | `domain/models.py`, `domain/recording_state.py`, `domain/operation_models.py` | 文件身份、快照元信息、安装状态转换、事务命令解码；不执行 IO |
+| Planning and execution / 规划与执行 | `verification/file_view.py`, `app/switch_plan.py`, `host/patch_modes.py` | 只读推演、输入复核、持久事务、执行与恢复 |
+| Adapter / 适配规则 | `host/adapters.py` | 插件专属路径、标记、归档位置和文件归属规则 |
+| Storage / 存储 | `storage/content_store.py`, `storage/version_store.py`, `storage/settings_store.py` | 原子写入、内容校验、包与依赖图、严格设置加载 |
+| Verification cache / 校验缓存 | `verification/verification_cache.py`, `verification/tree_checkpoint.py`, `verification/ntfs_journal.py` | 连续日志保护的目录检查点与 NTFS 内容缓存；失效时完整校验，独立于恢复对象 |
+| Runtime context / 路径上下文 | `app/runtime_context.py` | 不可变安装路径；基础模块不通过 Manager 反向寻找依赖 |
+| Observability / 操作状态 | `app/operations.py`, `domain/errors.py` | 有界操作记录、稳定错误代码、恢复建议 |
 | Browser / 前端 | `ui/api.js`, `ui/state.js`, `ui/runtime.js`, `ui/app.js` | 请求传输、不可变状态与 reducer、异步调度、DOM 呈现与事件 |
-| Maintenance / 插件维护 | `maintenance.py`, `maintenance_files.py`, `update_check.py`, `cache_gc.py` | 来源检查、检查点、首次运行验证、预览恢复与无引用回收；不进入日常扫描路径 |
-| Official host recovery / 官方宿主恢复 | `runtime_repair.py`, `official_host.py` | 同版本签名包补缺失；建立独立原生启动基线。两条显式流程都保留旧插件和用户数据 |
+| Maintenance / 插件维护 | `plugins/maintenance.py`, `storage/maintenance_files.py`, `plugins/update_check.py`, `storage/cache_gc.py` | 来源检查、检查点、首次运行验证、预览恢复与无引用回收；不进入日常扫描路径 |
+| Official host recovery / 官方宿主恢复 | `host/runtime_repair.py`, `host/official_host.py` | 同版本签名包补缺失；建立独立原生启动基线。两条显式流程都保留旧插件和用户数据 |
 | Distribution / 分发 | `packaging/Launcher.cs`, `packaging/build_portable.py` | 白名单打包、官方运行时哈希验证、无命令启动入口 |
 
 `ContentStore` does not know about plugins or `Manager`. `VersionStore` receives
@@ -296,7 +300,7 @@ Enabling the adapter retains the full parked-tree and installed-code checks.
 `preserveNative` 不能掩盖内置目录移动或其他内置文件写入。`configurationOnly` 只允许一个 manifest 写入，
 变化插件必须具有空文件差异，前后组合的文件状态、基线和内置补丁版本必须相同；提交前验证旧组合。
 
-`verification_cache.py` 是可丢弃的本机 NTFS 加速数据，独立于不可变内容库。键包含卷编号、文件标识、创建时间、
+`verification/verification_cache.py` 是可丢弃的本机 NTFS 加速数据，独立于不可变内容库。键包含卷编号、文件标识、创建时间、
 修改时间、NTFS ChangeTime、大小、当前 USN 日志身份与文件变更序号。查询期间以 `GENERIC_READ` 数据读取权限持有句柄，
 共享方式仅允许读取，复用前后均检查标识。仅申请属性权限的句柄不能阻止数据写入，旧格式 1、2 缓存已停用；
 不可靠或不支持的元信息改为完整读取。缓存带格式和校验和，损坏时忽略；同一文件标识只保留一个版本，
@@ -309,7 +313,7 @@ Enabling the adapter retains the full parked-tree and installed-code checks.
 目录检查点在连续日志验证通过后复用路径对象、子目录索引和指纹，每个目录最多缓存活动、暂存两个位置。
 返回给预演视图的条目和子目录集合独立复制，虚拟改动不能回写目录指纹；路径缓存不保存或替代本轮日志验证结果。切换后的元数据索引由
 独立结果校验的快照生成，避免重复遍历，也避免信任验证结束后才出现的外部文件。
-`domain.py` 另以有界内存缓存复用不可变路径字符串的语法检查，不缓存文件系统状态或路径安全检查结果。
+`domain/models.py` 另以有界内存缓存复用不可变路径字符串的语法检查，不缓存文件系统状态或路径安全检查结果。
 
 ## Validation and capacity / 验证与容量
 

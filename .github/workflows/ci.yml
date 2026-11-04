@@ -19,9 +19,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: python -m unittest discover -v
+      - run: python -m unittest discover -s tests -t . -v
       - run: node --check ui/app.js
       - run: node --check ui/state.js
       - run: node --check ui/api.js
       - run: node --check ui/runtime.js
-      - run: node --test test_ui.cjs
+      - run: node --test tests/ui/test_ui.cjs
