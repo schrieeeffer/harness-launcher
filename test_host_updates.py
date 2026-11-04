@@ -20,7 +20,7 @@ class AdapterHostUpdateTests(unittest.TestCase):
         manifest, registry, core = self.manifest.read_bytes(), tracker.index.read_bytes(), tracker.core.record.read_bytes()
         with patch.object(self.manager, 'backup') as backup, \
                 patch.object(tracker, 'metadata') as scan, \
-                patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
             self.manager.apply(selection, self.manager.state()['revision'], launch=True)
         self.assertEqual(caught.exception.code, 'host_identity_changed')
         self.assertFalse(caught.exception.retryable)
@@ -82,7 +82,7 @@ class AdapterHostUpdateTests(unittest.TestCase):
         self.switch(['dsh-purge'])
         (self.app / 'main.js').write_bytes(b'external edit')
         self.manager.tracking.check_host_identity(['dsh-purge'])
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
             self.manager.apply(['dsh-purge'], self.manager.state()['revision'], launch=True)
         spawn.assert_not_called()
 
@@ -136,7 +136,7 @@ class GenericHostUpdateTests(unittest.TestCase):
             self.exe.write_bytes(b'updated during preflight')
             return plan
         with patch.object(SwitchPlan, 'prepare', update_after_plan), \
-                patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         spawn.assert_not_called()
 
@@ -148,7 +148,7 @@ class GenericHostUpdateTests(unittest.TestCase):
             self.exe.write_bytes(b'new host just before launch')
             return receipt
         with patch.object(self.manager, 'switch_layers', side_effect=update_after_commit), \
-                patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         self.assertEqual(caught.exception.code, 'host_identity_changed')
         spawn.assert_not_called()
@@ -193,7 +193,7 @@ class UpdateBoundaryTests(unittest.TestCase):
         for selection in ([], ['dsh-purge']):
             with self.subTest(selection=selection):
                 self.switch(selection)
-                with patch('launcher.subprocess.Popen') as spawn:
+                with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
                     self.manager.apply(selection, self.manager.state()['revision'], launch=True)
                 spawn.assert_called_once()
 
@@ -218,7 +218,7 @@ class UpdateBoundaryTests(unittest.TestCase):
             (self.purge / 'index.js').write_bytes(b'updated with identical package version')
             return receipt
         with patch.object(self.manager, 'switch_layers', side_effect=update_after_commit), \
-                patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
             self.manager.apply(['dsh-purge'], self.manager.state()['revision'], launch=True)
         self.assertEqual(caught.exception.code, 'plugin_identity_changed')
         spawn.assert_not_called()
@@ -289,7 +289,7 @@ class UpdateBoundaryTests(unittest.TestCase):
         self.archive.write_bytes(self.archive_bytes)
         (self.resources / 'dsh-purge-reapply-asar').write_bytes(b'1')
         manifest = self.manifest.read_bytes()
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
             self.manager.apply(['dsh-purge'], self.manager.state()['revision'], launch=True)
         spawn.assert_not_called()
         self.assertTrue(moved.is_dir())
@@ -325,7 +325,7 @@ class GenericPackageUpdateTests(unittest.TestCase):
             (self.profile / 'node_modules' / 'plugin-a' / 'index.js').write_bytes(b'new code, same version')
             return result
         with patch.object(SwitchPlan, 'verify_current', update), \
-                patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError) as caught:
             self.manager.apply(['plugin-a'], self.manager.state()['revision'], launch=True)
         self.assertEqual(caught.exception.code, 'plugin_identity_changed')
         spawn.assert_not_called()
@@ -333,7 +333,7 @@ class GenericPackageUpdateTests(unittest.TestCase):
     def test_inactive_generic_update_does_not_block_native_but_is_rejected_on_enable(self):
         self.manager.apply([], self.manager.state()['revision'])
         (self.profile / 'node_modules' / 'plugin-a' / 'index.js').write_bytes(b'new inactive code')
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         spawn.assert_called_once()
         with self.assertRaises(MenuError) as caught:

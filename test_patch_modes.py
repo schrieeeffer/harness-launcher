@@ -155,7 +155,7 @@ class PatchModeTests(unittest.TestCase):
         self.assertFalse(self.archive.exists())
         self.assertTrue(self.manager.state()['patchMode']['archiveAvailable'])
 
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             self.manager.apply(['dsh-purge'], self.manager.state()['revision'], launch=True)
         spawn.assert_called_once()
         self.switch([])
@@ -241,20 +241,29 @@ class PatchModeTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), modified)
         self.assertFalse(self.app.exists())
 
-    def test_unadapted_plugin_blocks_native_claim_before_mutating_files(self):
+    def test_inactive_official_plugin_is_preserved_during_native_restore(self):
         other = self.profile / 'node_modules' / 'other'
         other.mkdir()
         (other / 'package.json').write_text(json.dumps({'name': 'other', 'dsh': {'bundle': {}}}))
-        with self.assertRaises(MenuError):
-            self.switch([])
-        self.assertTrue(self.app.exists())
-        self.assertEqual(self.manifest.read_bytes(), self.initial_manifest)
+        self.switch([])
+        self.assertFalse(self.app.exists())
+        self.assertTrue((other / 'package.json').is_file())
+        self.assertEqual(self.manager.manifest()[2], list(OFFICIAL))
 
     def test_dynamic_or_plugin_yaml_blocks_native_claim(self):
         (self.profile / 'cordis.patch.yml').write_text('- insert:\n  - name: other-plugin\n')
         with self.assertRaises(MenuError):
             self.switch([])
         self.assertTrue(self.app.exists())
+
+    def test_native_restore_preserves_model_labels_inside_user_configuration(self):
+        config = self.profile / 'cordis.patch.yml'
+        config.write_text(json.dumps([{'name': '@deepseek-ai/dsh-llm-pi-ai',
+                                      'config': {'models': [{'name': 'GPT-6 Astra'}]}}]))
+        before = config.read_bytes()
+        self.switch([])
+        self.assertFalse(self.app.exists())
+        self.assertEqual(config.read_bytes(), before)
 
     def test_mid_switch_failure_rolls_back_directory_files_and_manifest(self):
         real_replace = os.replace
@@ -275,7 +284,7 @@ class PatchModeTests(unittest.TestCase):
         self.assertEqual(self.manager.tracking.core.load()['mode'], 'captured')
 
     def test_launch_failure_rolls_back_patch_switch(self):
-        with patch('launcher.subprocess.Popen', side_effect=OSError('spawn failed')):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen', side_effect=OSError('spawn failed')):
             with self.assertRaises(MenuError):
                 self.manager.apply([], self.manager.state()['revision'], launch=True, native=True)
         self.assertTrue(self.app.exists())

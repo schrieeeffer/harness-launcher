@@ -25,7 +25,7 @@ class CurrentLaunchTests(unittest.TestCase):
         log = OperationLog()
         identity = log.begin('launch')
         with log.reporting(identity), patch.object(self.manager, 'backup') as backup, \
-                patch.object(self.manager, 'switch_layers') as switch, patch('launcher.subprocess.Popen') as spawn:
+                patch.object(self.manager, 'switch_layers') as switch, patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             result = self.launch()
         self.assertTrue(result['verifiedCurrent'])
         backup.assert_not_called()
@@ -43,7 +43,7 @@ class CurrentLaunchTests(unittest.TestCase):
         info = live.stat()
         live.write_bytes(b'modified')
         os.utime(live, ns=(info.st_atime_ns, info.st_mtime_ns))
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaisesRegex(MenuError, '文件内容已变化'):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaisesRegex(MenuError, '文件内容已变化'):
             self.launch()
         spawn.assert_not_called()
 
@@ -52,7 +52,7 @@ class CurrentLaunchTests(unittest.TestCase):
         for path in (self.profile / 'node_modules/plugin-a/package.json', self.exe):
             original = path.read_bytes()
             path.write_bytes(original.replace(b'1.2', b'1.3') if path != self.exe else b'changed host')
-            with self.subTest(path=path.name), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+            with self.subTest(path=path.name), patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
                 self.launch()
             spawn.assert_not_called()
             path.write_bytes(original)
@@ -61,6 +61,7 @@ class CurrentLaunchTests(unittest.TestCase):
         self.seal()
         raw = self.path.read_bytes()
         with patch.object(self.manager, 'rollback_layers') as undo, \
+                patch('installer_policy.ensure_adapter_isolation'), \
                 patch('launcher.subprocess.Popen', side_effect=OSError('fixture spawn failed')), self.assertRaises(MenuError):
             self.launch()
         undo.assert_not_called()
@@ -73,7 +74,7 @@ class CurrentLaunchTests(unittest.TestCase):
             original(*args, **kwargs)
             self.path.write_bytes(self.path.read_bytes() + b' ')
         with patch.object(self.manager.tracking, 'check_versions', side_effect=change), \
-                patch('launcher.subprocess.Popen') as spawn, self.assertRaisesRegex(MenuError, '校验期间配置'):
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaisesRegex(MenuError, '校验期间配置'):
             self.launch()
         spawn.assert_not_called()
 
@@ -81,7 +82,7 @@ class CurrentLaunchTests(unittest.TestCase):
         self.seal()
         before = self.manager.tracking.load()['currentCombination']
         with patch.object(self.manager, 'switch_layers', wraps=self.manager.switch_layers) as switch, \
-                patch('launcher.subprocess.Popen'):
+                patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen'):
             result = self.manager.apply([], self.manager.state()['revision'], launch=True)
         switch.assert_called_once()
         self.assertFalse(result['verifiedCurrent'])
@@ -100,7 +101,7 @@ class DormantAdapterLaunchTests(unittest.TestCase):
         self.switch([])
         parked = self.manager.tracking.core.stash / 'app' / 'main.js'
         parked.write_bytes(b'dormant edit')
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             result = self.manager.apply([], self.manager.state()['revision'], launch=True, native=True)
         self.assertTrue(result['verifiedCurrent'])
         spawn.assert_called_once()
@@ -111,7 +112,7 @@ class DormantAdapterLaunchTests(unittest.TestCase):
     def test_active_adapter_tree_is_still_content_checked(self):
         self.switch(['dsh-purge'])
         (self.app / 'main.js').write_bytes(b'active edit')
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
             self.manager.apply(['dsh-purge'], self.manager.state()['revision'], launch=True)
         spawn.assert_not_called()
 

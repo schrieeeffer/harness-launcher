@@ -35,6 +35,8 @@ class TrackingError(PatchError):
 
 
 class PluginTracking:
+    USER_SCOPES = frozenset(('agents', 'claude', 'prompt', 'rules', 'skills', 'presets', 'user_yaml', 'root_yaml'))
+
     def __init__(self, manager):
         self.manager = manager
         self.core = PatchModes(RuntimeContext.from_manager(manager), require_stopped=manager.require_stopped)
@@ -222,6 +224,31 @@ class PluginTracking:
                 result.append({'key': key, 'before': a, 'after': b})
         return result
 
+    def conflicting_keys(self, keys, value=None, selection=()):
+        """User-owned configuration may evolve while unrelated patches are off.
+
+        Program scopes always stay verified. An active or requested patch owns
+        each of its changed paths and their ancestors/descendants. A dormant
+        patch does not freeze the user's settings; replaying it still requires
+        its original bytes and reports a conflict if those settings changed.
+        """
+        value = self.load() if value is None else value
+        owned = [self.target(change['key']) for name, record in value['records'].items()
+                 if record['enabled'] or name in selection
+                 for change in self.read_object(record['delta'])['changes']]
+        owned.extend(self.target(change['key']) for change in value.get('supportDirectories', []))
+        core = self.core.load()
+        if core and (core['mode'] == 'plugin' or self.core.adapter.plugin in selection):
+            owned.extend(Path(item['path']) for item in core['files'])
+            owned.extend(Path(item['active']) for item in core['directories'])
+        conflicts = []
+        for key in keys:
+            path = self.target(key)
+            if (key.split('|', 1)[0] not in self.USER_SCOPES
+                    or any(path == item or path.is_relative_to(item) or item.is_relative_to(path) for item in owned)):
+                conflicts.append(key)
+        return conflicts
+
     def capture_adapter(self, plugins, before, changes, *, view=None):
         """Split a supervised installation between archive and ordinary layers.
 
@@ -383,6 +410,7 @@ class PluginTracking:
             expected = self.read_object(value['inventory'])
             actual = self.metadata()
             changed = [key for key in set(expected) | set(actual) if expected.get(key) != actual.get(key)]
+            changed = self.conflicting_keys(changed, value)
             if changed:
                 # Harness can rewrite generated cordis.yml without changing its
                 # bytes. Metadata is a fast filter, not evidence of a new patch.
@@ -459,6 +487,14 @@ class PluginTracking:
         for key in owned:
             if expected is None or not self.equal(self.actual(key), expected.get(key)):
                 raise TrackingError('正在启用的受管补丁文件已变化：' + key)
+        if expected is not None:
+            from file_view import FileView
+            code_scopes = {key: path for key, path in self.scopes.items() if key not in self.USER_SCOPES}
+            actual = FileView(code_scopes.values(), verification_cache=self.manager.verification_cache).snapshot(code_scopes)
+            changes = self.differences({key: entry for key, entry in expected.items()
+                                        if key.split('|', 1)[0] in code_scopes}, actual)
+            if changes:
+                raise TrackingError('程序文件与已验证内容不同：' + '、'.join(change['key'] for change in changes[:4]))
         if self.core.adapter.plugin in selection:
             if core is None:
                 raise TrackingError('缺少已启用适配器的补丁记录。')
@@ -619,7 +655,7 @@ class PluginTracking:
                 raise TrackingError('备份完成前文件已经改变，不能把现状当作原始文件。请恢复原状后重试。')
             baseline = self.snapshot()
             recorded = self.recorded_state(value)
-            if recorded is not None and self.differences(recorded, baseline):
+            if recorded is not None and self.conflicting_keys((change['key'] for change in self.differences(recorded, baseline)), value):
                 raise TrackingError('记录窗口外的文件内容发生变化，不能作为新安装的原始状态。请恢复原状后重试。')
             self.manager.require_stopped()
             if self.metadata() != self.read_object(session['initialInventory']):

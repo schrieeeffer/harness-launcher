@@ -93,3 +93,35 @@ class OfficialPluginTests(unittest.TestCase):
         self.assertEqual((self.app / 'main.js').read_bytes(), b'A')
         self.assertEqual(self.manifest.read_bytes(), before)
         self.assertTrue(self.manager.tracking.load()['records']['plugin-a']['enabled'])
+
+    def test_dormant_patch_does_not_freeze_user_yaml_but_cannot_overwrite_new_settings(self):
+        self.apply([])
+        config = self.profile / 'cordis.patch.yml'
+        config.write_bytes(b'# user original\n[]\n')
+        self.begin('patch-a')
+        self.install_fixture('patch-a')
+        config.write_bytes(b'# patch owns this file\n[]\n')
+        self.accept()
+        self.apply([])
+        self.begin('ordinary-b')
+        self.install_fixture('ordinary-b')
+        self.accept()
+        self.apply([])
+        config.write_bytes(b'# Harness changed user preferences\n[]\n')
+        expected = config.read_bytes()
+        self.apply(['ordinary-b'])
+        self.apply([])
+        self.assertEqual(config.read_bytes(), expected)
+        with self.assertRaises(MenuError):
+            self.apply(['patch-a'])
+        self.assertEqual(config.read_bytes(), expected)
+
+    def test_external_plugin_cannot_hide_an_unrecorded_program_change(self):
+        self.apply([])
+        self.external()
+        target = self.exe.parent / 'resources/runtime/cli/unexpected.js'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'unknown code')
+        with patch.object(self.manager, 'spawn_harness') as spawn, self.assertRaises((MenuError, PatchError)):
+            self.apply(['@local/created'], launch=True)
+        spawn.assert_not_called()

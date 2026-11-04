@@ -19,7 +19,7 @@ PYTHON = '3.13.17'
 RUNTIME_SHA = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
 MODULES = '''adapters bootstrap.ps1 cache_gc catalog domain errors file_view host_modules install_sources installer_policy launch.vbs launcher maintenance
 maintenance_files ntfs_journal official_host official_package official_update operation_models operations patch_modes plugin_tracking
-recording_state runtime_context runtime_integrity runtime_repair settings_store storage switch_plan tree_checkpoint update_check
+profile_config recording_state runtime_context runtime_integrity runtime_repair settings_store storage switch_plan tree_checkpoint update_check
 verification_cache version_store'''.split()
 
 

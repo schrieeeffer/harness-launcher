@@ -77,7 +77,8 @@ class SwitchPlan:
         view = self.file_view(self.tracker.scopes.values())
         actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes,
             progress=lambda done, total: report_progress('files', '校验当前组合文件', done, total)))
-        if actual != combination['state']:
+        changed = [key for key in set(actual) | set(combination['state']) if actual.get(key) != combination['state'].get(key)]
+        if self.tracker.conflicting_keys(changed, old, selection):
             raise PatchError('当前组合文件内容已变化，未启动 Harness。请检查记录之外的改动。')
         # Recheck control inputs after potentially lengthy reads. This path
         # neither creates a journal nor writes the manifest or plugin layers.
@@ -245,7 +246,7 @@ class SwitchPlan:
                 expected = self.tracker.versions.content_state(recorded)
                 actual = self.tracker.versions.content_state(view.snapshot(self.tracker.scopes))
                 changed = [key for key in set(expected) | set(actual) if expected.get(key) != actual.get(key)]
-                if changed:
+                if self.tracker.conflicting_keys(changed, old, selection):
                     raise PatchError('记录窗口外发生了文件内容变化，未开始切换：' + '、'.join(sorted(changed)[:4]))
         initial = copy.deepcopy(view)
         operations = []
@@ -288,8 +289,15 @@ class SwitchPlan:
                 baseline['archiveInfo'] = archive_info(self.core.archive, self.core.resources / 'app.asar.unpacked',
                                                       verify=True, view=native_view)
         if previous_baseline and previous_value != baseline:
-            raise PatchError('原生基线与已有记录不同，未修改文件。请检查应用更新或记录之外的改动。')
-        baseline_ref = previous_baseline or self.tracker.versions.object('baselines', baseline)
+            previous_files = previous_value.get('state', {})
+            changed = [key for key in set(previous_files) | set(baseline_state) if previous_files.get(key) != baseline_state.get(key)]
+            # The immutable baseline is authoritative for program contents.
+            # User settings may have a newer recorded pre-install value; the
+            # verified layer replay above already proves each owned transition.
+            if (any(key.split('|', 1)[0] not in self.tracker.USER_SCOPES for key in changed)
+                    or {k: v for k, v in previous_value.items() if k != 'state'} != {k: v for k, v in baseline.items() if k != 'state'}):
+                raise PatchError('原生基线与已有记录不同，未修改文件。请检查应用更新或记录之外的改动。')
+        baseline_ref = previous_baseline if reuse_baseline else self.tracker.versions.object('baselines', baseline)
         if not reuse_baseline:
             report_progress('files', '校验官方归档与还原快照')
             self._keep_baseline_blobs(native_view, baseline_snapshot)

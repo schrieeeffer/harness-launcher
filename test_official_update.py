@@ -101,7 +101,7 @@ class OfficialUpdateTests(unittest.TestCase):
         self.assertEqual(self.old_tracker.store.root, self.manager.tracking.store.root)
         self.assertEqual(self.manager.state()['hostHealth']['status'], 'ready')
         reopened = Manager(self.manager.data, self.home, self.exe)
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             for _ in range(2):
                 reopened.apply([], reopened.state()['revision'], launch=True)
         self.assertEqual(spawn.call_count, 2)
@@ -110,7 +110,7 @@ class OfficialUpdateTests(unittest.TestCase):
 
     def test_explicit_launch_auto_adopts_cached_external_update(self):
         self.cache()
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         spawn.assert_called_once()
         self.assertNotEqual(self.old_tracker.root, self.manager.tracking.root)
@@ -128,7 +128,7 @@ class OfficialUpdateTests(unittest.TestCase):
         self.manager.official_host.accept(plan['token'])
         self.assertEqual(self.manager.state()['hostHealth']['status'], 'native_ready')
         old_registry = self.old_tracker.index.read_bytes()
-        with patch('plugin_tracking.PluginTracking._job') as job, patch('launcher.subprocess.Popen') as spawn:
+        with patch('plugin_tracking.PluginTracking._job') as job, patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             result = self.manager.begin_tracking('@author/plugin-new', '@author/plugin-new@3.1.6')
         job.assert_called_once()
         spawn.assert_not_called()
@@ -368,7 +368,7 @@ class OfficialUpdateTests(unittest.TestCase):
     def test_suspended_plugin_does_not_block_safe_native_launch_after_adoption(self):
         self.record_plugin(requirement='<0.3.0')
         self.cache()
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             result = self.manager.apply(['plugin-a'], self.manager.state()['revision'], launch=True)
         spawn.assert_called_once()
         self.assertIn('plugin-a', result['officialUpdate']['suspended'])
@@ -391,7 +391,7 @@ class OfficialUpdateTests(unittest.TestCase):
         root = self.manager.tracking.root
         path.unlink()
         self.cache()
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         self.assertEqual(path.read_bytes(), b'official library')
         self.assertEqual(root, self.manager.tracking.root)
@@ -407,7 +407,7 @@ class OfficialUpdateTests(unittest.TestCase):
                 path.unlink()
             else:
                 path.write_bytes(content)
-            with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
+            with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
                 self.manager.apply([], self.manager.state()['revision'], launch=True)
             spawn.assert_not_called()
 

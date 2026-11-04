@@ -442,15 +442,17 @@ class PatchModes:
         unknown = [p['id'] for p in plugins if p['id'] != self.adapter.plugin]
         if unknown:
             raise PatchError('这些插件尚未接入补丁还原，无法保证原生模式：' + '、'.join(unknown))
+        from profile_config import parse_documents, verify_entries
+        filenames, sources = [], []
         for filename in ['cordis.yml', 'cordis.patch.yml']:
             path = self.context.profile / filename
             if not (view.is_file(path) if view else path.is_file()):
                 continue
-            source = '\n'.join(line for line in (view.read_bytes(path).decode('utf-8-sig') if view else path.read_text(encoding='utf-8-sig')).splitlines()
-                               if not line.lstrip().startswith('#'))
-            names = re.findall(r'''(?m)^\s*(?:-\s*)?name:\s*["']?([^\s"'#]+)''', source)
-            if '!!js' in source or any(not name.startswith('@deepseek-ai/') for name in names):
-                raise PatchError('用户 YAML 配置包含额外插件或动态表达式，无法验证原生模式：' + filename)
+            filenames.append(filename)
+            sources.append(view.read_bytes(path).decode('utf-8-sig') if view else path.read_text(encoding='utf-8-sig'))
+        archive = self.official_archive(view) or self.archive
+        for filename, document in zip(filenames, parse_documents(str(self.context.executable), str(archive), tuple(sources))):
+            verify_entries(document, filename)
 
     def prepare(self, selection, plugins, before, after, strict_native=False, view=None, *, preserve_native=False):
         state = self.load()

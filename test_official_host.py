@@ -57,7 +57,7 @@ class OfficialHostTests(unittest.TestCase):
         state = self.manager.state()
         self.assertEqual(state['hostHealth']['status'], 'changed')
         self.assertFalse(state['patchMode']['verifiedNative'])
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
             self.manager.apply([], state['revision'], launch=True)
         spawn.assert_not_called()
         self.signature.assert_not_called()
@@ -67,7 +67,7 @@ class OfficialHostTests(unittest.TestCase):
         before = {p: hash_file(p) for p in self.manager.tracking.root.rglob('*') if p.is_file()}
         host = {name: hash_file(self.exe.parent / name) for name in self.sizes}
         self.approve()
-        with patch('launcher.subprocess.Popen') as spawn, patch.object(self.manager, 'switch_layers') as replay:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, patch.object(self.manager, 'switch_layers') as replay:
             result = self.manager.apply([], self.manager.state()['revision'], launch=True)
         self.assertTrue(result['officialNative'])
         spawn.assert_called_once()
@@ -81,7 +81,7 @@ class OfficialHostTests(unittest.TestCase):
     def test_approval_cannot_enable_old_purge_or_apply_or_begin_recording(self):
         self.approve()
         for selection, launch in [(['dsh-purge'], True), ([], False)]:
-            with self.subTest(selection=selection, launch=launch), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
+            with self.subTest(selection=selection, launch=launch), patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(MenuError):
                 self.manager.apply(selection, self.manager.state()['revision'], launch=launch)
             spawn.assert_not_called()
         with self.assertRaises(LauncherError):
@@ -148,7 +148,7 @@ class OfficialHostTests(unittest.TestCase):
             path.write_bytes(original.replace(original[:1], b'X', 1))
             import os
             os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
-            with self.subTest(path=path), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
+            with self.subTest(path=path), patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
                 self.manager.apply([], self.manager.state()['revision'], launch=True)
             spawn.assert_not_called()
             path.write_bytes(original)
@@ -157,7 +157,7 @@ class OfficialHostTests(unittest.TestCase):
         self.approve()
         self.manifest.write_bytes(self.manifest.read_bytes() + b' ')
         self.assertEqual(self.service.status()['status'], 'changed')
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         spawn.assert_not_called()
 
@@ -181,7 +181,7 @@ class OfficialHostTests(unittest.TestCase):
         with patch('launcher.running_harness', return_value=[999]):
             with self.assertRaises(LauncherError):
                 self.prepare()
-            with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
+            with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
                 self.manager.apply([], self.manager.state()['revision'], launch=True)
             spawn.assert_not_called()
 
@@ -191,7 +191,7 @@ class OfficialHostTests(unittest.TestCase):
         self.sizes[self.exe.name] = len(b'fixture')
         self.assertEqual(self.service.status()['components'], ['officialArchive'])
         self.approve()
-        with patch('launcher.subprocess.Popen') as spawn:
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn:
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         spawn.assert_called_once()
 
@@ -200,7 +200,7 @@ class OfficialHostTests(unittest.TestCase):
         reference = json.loads(self.service.pointer.read_bytes())['baseline']
         (self.manager.tracking.root / reference).write_bytes(b'{}')
         self.assertEqual(self.service.status()['status'], 'changed')
-        with patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen') as spawn, self.assertRaises(LauncherError):
             self.manager.apply([], self.manager.state()['revision'], launch=True)
         spawn.assert_not_called()
 
