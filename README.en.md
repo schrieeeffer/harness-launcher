@@ -4,7 +4,7 @@
 
 Choose the plugins you want to use, then start DeepSeek Harness. Save your usual combinations, switch back to the official native setup, and manage plugin updates and removal from one desktop panel.
 
-[Download for Windows](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) · [中文](README.md) · [Report a problem](https://github.com/schrieeeffer/harness-launcher/issues)
+[Download for Windows](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) · [中文](README.md) · [Architecture](#architecture-and-verification) · [Report a problem](https://github.com/schrieeeffer/harness-launcher/issues)
 
 Version **0.4.4**, a community preview for Windows 10/11 x64. The portable archive includes its Python runtime. Install the official DeepSeek Harness desktop app first. This project is unaffiliated with DeepSeek.
 
@@ -21,6 +21,18 @@ Keep the `runtime` and `ui` folders next to the executable. The archive contains
 ```powershell
 Get-FileHash .\Harness-Launcher-0.4.4-Windows-x64.zip -Algorithm SHA256
 ```
+
+## Architecture and verification
+
+The launcher manages combinations, file changes, and recovery records; Harness runs the plugins. Ordinary plugins use the general recorder, while plugins that modify program files use a dedicated adapter. Plugins installed inside Harness keep their official installation and loading workflow. Special-plugin build scripts stay isolated during ordinary installation.
+
+![Launcher architecture: plugin management, adapters, verification caches, and recovery storage](docs/images/architecture.svg)
+
+The first recording saves a baseline and the files added, removed, or modified by the plugin. Normal launches reuse verified indexes when NTFS file identities and the change journal still match. Changed files or gaps in the journal trigger fresh reads. Switches verify their inputs and record execution steps; recovery content is deduplicated by SHA-256 and retained while records reference it.
+
+![Verification paths for an unchanged combination, configuration changes, and file patches](docs/images/verification-principle.svg)
+
+See the [architecture documentation](docs/architecture.md) and [measured startup results](docs/startup-validation.md) for implementation details and test conditions. Diagram labels are in Chinese.
 
 ## Everyday use
 

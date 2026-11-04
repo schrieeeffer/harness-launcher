@@ -1,10 +1,10 @@
-# Harness Launcher
+# Harness Launcher：DeepSeek Harness 中文插件管理器与启动器
 
 <img src="docs/images/logo.svg" width="64" alt="Harness Launcher">
 
-给 DeepSeek Harness 加一个插件启动面板。选好今天要用的插件，点击启动；想回到官方原版时，切换到原生模式。安装、检查更新、卸载和恢复旧版本，也在同一个窗口里完成。
+Harness Launcher 是面向 DeepSeek Harness（DSH）的 Windows 中文插件管理器与启动器。选好今天要用的插件，一键启动；把常用搭配保存为方案，需要排查问题时再切回官方原生配置。插件安装、更新、卸载和回滚，都可以在桌面面板中操作。
 
-[下载 Windows 便携版](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) · [English](README.en.md) · [使用文档](#使用文档) · [反馈问题](https://github.com/schrieeeffer/harness-launcher/issues)
+[下载 Windows 便携版](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) · [快速开始](#下载与第一次启动) · [架构与工作原理](#架构与工作原理) · [使用文档](#使用文档) · [English](README.en.md) · [反馈问题](https://github.com/schrieeeffer/harness-launcher/issues)
 
 当前版本：**0.4.4**（社区预览版）。支持 Windows 10/11 x64，便携包自带运行环境。先安装官方 DeepSeek Harness，再使用本启动器。
 
@@ -26,6 +26,8 @@
 | 尝试社区插件 | 发现插件 → 选择插件 → 安装 |
 | 更新或移除插件 | 更新与卸载 |
 | 撤销一次插件维护 | 更新与卸载 → 恢复检查点 |
+| 切换 dsh-purge 的已记录补丁 | 首页插件开关 → 启动 Harness，由专用适配器处理程序补丁 |
+| 让 Harness 编写自己的插件 | Harness 的创造模式与插件页面，启动器保留当前加载配置 |
 | 官方更新后缺少运行时文件 | 设置与说明 → 官方运行时修复 |
 
 ## 下载与第一次启动
@@ -43,6 +45,22 @@
 ```powershell
 Get-FileHash .\Harness-Launcher-0.4.4-Windows-x64.zip -Algorithm SHA256
 ```
+
+## 架构与工作原理
+
+启动器管理插件组合、文件变更和恢复记录，DeepSeek Harness 负责运行插件。普通插件使用通用记录层；dsh-purge 等修改程序文件的插件通过专用适配器处理；在 Harness 内自行安装的插件继续由官方管理。特殊插件的构建脚本单独隔离，普通插件安装不会顺带执行它们。
+
+![DeepSeek Harness 插件管理架构：启动面板、普通插件、特殊插件适配器、校验缓存与恢复记录](docs/images/architecture.svg)
+
+### 检查点如何减少重复校验
+
+首次记录时保存基线，以及插件增加、删除和修改了哪些文件。日常启动先核对官方版本、当前组合和依赖，再利用 Windows NTFS 的文件身份与连续变更日志判断哪些校验结果可以复用。文件变化或日志不连续时，重新读取受影响的内容。
+
+切换插件前，启动器校验本次要使用的文件，再通过事务日志记录执行步骤。恢复内容按 SHA-256 去重，同一份内容只保存一份；仍被插件、方案或恢复点引用的内容会继续保留。
+
+![插件启动与回滚校验原理：区分原组合启动、加载配置切换和文件补丁切换，复用有效检查点](docs/images/verification-principle.svg)
+
+本机 pet 的日常启动和两种启停切换，实测为 **28.1、28.5、28.8 秒**到窗口可用。完整环境与计时方法见[启动速度实测](docs/startup-validation.md)；模块关系和更详细的流程见[架构文档](docs/architecture.md)。
 
 ## 选择插件，启动工作
 
