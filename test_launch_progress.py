@@ -36,8 +36,8 @@ class CurrentLaunchTests(unittest.TestCase):
         self.assertFalse((self.manager.tracking.root / 'switch.json').exists())
 
     def test_same_metadata_live_content_edit_blocks_launch(self):
-        live = self.home / 'rules' / 'custom.txt'
-        live.parent.mkdir()
+        live = self.exe.parent / 'resources/runtime/cli/custom.js'
+        live.parent.mkdir(parents=True, exist_ok=True)
         live.write_bytes(b'original')
         self.seal()
         info = live.stat()

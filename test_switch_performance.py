@@ -135,15 +135,15 @@ class NativeSwitchTests(unittest.TestCase):
         plan = self.prepare([])
         tracker = self.manager.tracking
         save = tracker.core.save
-        added = self.home / 'rules' / 'outside-record.txt'
+        added = self.exe.parent / 'resources/runtime/cli/outside-record.txt'
         def after_verification(value):
             save(value)
-            added.parent.mkdir(exist_ok=True)
+            added.parent.mkdir(parents=True, exist_ok=True)
             added.write_bytes(b'not part of the verified result')
         with patch.object(tracker.core, 'save', side_effect=after_verification):
             SwitchPlan(tracker).execute(plan)
         self.assertTrue(added.exists())
-        self.assertNotIn('rules|outside-record.txt', tracker.read_object(tracker.load()['inventory']))
+        self.assertNotIn('cli|outside-record.txt', tracker.read_object(tracker.load()['inventory']))
         with self.assertRaises(PatchError):
             tracker.guard(check_files=True)
 

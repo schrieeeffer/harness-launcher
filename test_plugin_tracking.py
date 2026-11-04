@@ -155,7 +155,7 @@ class GenericTrackingTests(unittest.TestCase):
 
     def test_unchanged_generated_yaml_can_switch_after_timestamp_only_rewrites(self):
         root_yaml = self.profile / 'cordis.yml'
-        content = b'plugins:\n  desktop: {}\n'
+        content = b'[{"name":"@deepseek-ai/desktop","config":{}}]\n'
         root_yaml.write_bytes(content)
         self.begin()
         self.install_fixture('plugin-a')
@@ -174,44 +174,46 @@ class GenericTrackingTests(unittest.TestCase):
 
     def test_recorded_yaml_patch_still_restores_after_timestamp_only_rewrite(self):
         root_yaml = self.profile / 'cordis.yml'
-        root_yaml.write_bytes(b'original config')
+        root_yaml.write_bytes(b'# original config\n[]')
         self.begin()
         self.install_fixture('plugin-a')
-        root_yaml.write_bytes(b'plugin config')
+        root_yaml.write_bytes(b'# plugin config\n[]')
         self.accept()
         stamp = root_yaml.stat().st_mtime_ns + 2_000_000_000
         os.utime(root_yaml, ns=(stamp, stamp))
         self.apply([])
-        self.assertEqual(root_yaml.read_bytes(), b'original config')
+        self.assertEqual(root_yaml.read_bytes(), b'# original config\n[]')
         self.apply(['dsh-purge', 'plugin-a'])
-        self.assertEqual(root_yaml.read_bytes(), b'plugin config')
+        self.assertEqual(root_yaml.read_bytes(), b'# plugin config\n[]')
 
     def test_changed_yaml_content_is_rejected_even_with_same_size(self):
         root_yaml = self.profile / 'cordis.yml'
-        root_yaml.write_bytes(b'config: A')
+        root_yaml.write_bytes(b'# native\n[]')
         self.begin()
         self.install_fixture('plugin-a')
+        root_yaml.write_bytes(b'# config: A\n[]')
         self.accept()
         for sealed in (False, True):
             with self.subTest(current_combination=sealed):
                 if sealed:
                     self.apply(['dsh-purge', 'plugin-a'])
                 stamp = root_yaml.stat().st_mtime_ns
-                root_yaml.write_bytes(b'config: B')
+                root_yaml.write_bytes(b'# config: B\n[]')
                 os.utime(root_yaml, ns=(stamp + 2_000_000_000, stamp + 2_000_000_000))
                 manifest = self.manifest.read_bytes()
                 with self.assertRaisesRegex(MenuError, 'root_yaml'):
                     self.apply([])
-                self.assertEqual(root_yaml.read_bytes(), b'config: B')
+                self.assertEqual(root_yaml.read_bytes(), b'# config: B\n[]')
                 self.assertEqual(self.manifest.read_bytes(), manifest)
-                root_yaml.write_bytes(b'config: A')
+                root_yaml.write_bytes(b'# config: A\n[]')
                 os.utime(root_yaml, ns=(stamp, stamp))
 
     def test_missing_content_evidence_does_not_approve_a_timestamp_change(self):
         root_yaml = self.profile / 'cordis.yml'
-        root_yaml.write_bytes(b'config')
+        root_yaml.write_bytes(b'[]')
         self.begin()
         self.install_fixture('plugin-a')
+        root_yaml.write_bytes(b'# plugin config\n[]')
         self.accept()
         tracker = self.manager.tracking
         value = tracker.load()
@@ -224,14 +226,15 @@ class GenericTrackingTests(unittest.TestCase):
 
     def test_next_install_cannot_adopt_changes_with_preserved_size_and_timestamp(self):
         root_yaml = self.profile / 'cordis.yml'
-        root_yaml.write_bytes(b'config: A')
+        root_yaml.write_bytes(b'# native\n[]')
         self.begin()
         self.install_fixture('plugin-a')
+        root_yaml.write_bytes(b'# config: A\n[]')
         self.accept()
         tracker = self.manager.tracking
         previous = tracker.load()
         stamp = root_yaml.stat().st_mtime_ns
-        root_yaml.write_bytes(b'config: B')
+        root_yaml.write_bytes(b'# config: B\n[]')
         os.utime(root_yaml, ns=(stamp, stamp))
         self.assertEqual(tracker.metadata(), tracker.read_object(previous['inventory']))
         self.popen.reset_mock()
@@ -241,15 +244,15 @@ class GenericTrackingTests(unittest.TestCase):
         self.assertIsNone(summary['session']['baseline'])
         self.assertEqual(tracker.load()['records'], previous['records'])
         self.popen.assert_not_called()
-        self.assertEqual(root_yaml.read_bytes(), b'config: B')
+        self.assertEqual(root_yaml.read_bytes(), b'# config: B\n[]')
         # The original trusted content remains available for a later retry.
-        root_yaml.write_bytes(b'config: A')
+        root_yaml.write_bytes(b'# config: A\n[]')
         os.utime(root_yaml, ns=(stamp, stamp))
         with patch.object(tracker, 'install'), patch.object(tracker, '_launch'):
             tracker.retry()
             self.wait_job()
         baseline = tracker.read_object(tracker.load()['session']['baseline'])
-        self.assertEqual(tracker.blob_bytes(baseline['root_yaml|.']['hash']), b'config: A')
+        self.assertEqual(tracker.blob_bytes(baseline['root_yaml|.']['hash']), b'# config: A\n[]')
 
     def test_credentials_sessions_dependencies_and_outside_paths_are_not_snapshotted(self):
         (self.home / '.credentials.yaml').write_bytes(b'not to be read')

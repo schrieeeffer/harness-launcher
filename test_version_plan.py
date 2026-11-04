@@ -251,18 +251,18 @@ class VersionPlanTests(unittest.TestCase):
         previous = tracker.load()
         self.assertFalse(previous.get('currentCombination'))
         self.assertFalse(previous.get('nativeBaselines'))
-        target = self.profile / 'cordis.yml'
+        target = self.cli
         before = target.stat()
         original = target.read_bytes()
-        self.assertEqual(original.strip(), b'[]')
-        modified = original.replace(b'[]', b'{}')
+        modified = b'X' + original[1:]
+        self.assertNotEqual(modified, original)
         target.write_bytes(modified)
         os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
         self.assertEqual(tracker.metadata(), tracker.read_object(previous['inventory']))
         manifest = self.manifest.read_bytes()
 
         with patch.object(SwitchPlan, 'replay') as replay:
-            with self.assertRaisesRegex(MenuError, '内容变化.*root_yaml'):
+            with self.assertRaisesRegex(MenuError, '内容变化.*cli'):
                 self.apply([])
             replay.assert_not_called()
         self.assertEqual(target.read_bytes(), modified)
