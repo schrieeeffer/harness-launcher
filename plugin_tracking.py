@@ -438,6 +438,37 @@ class PluginTracking:
         if self.manager.manifest_path.read_bytes() != manifest:
             raise TrackingError('启动前加载配置再次发生变化，未打开 Harness。', code='revision_conflict', retryable=True)
 
+    def verify_official_configuration(self, selection, plugins, manifest):
+        """Launch an official-managed profile without adopting or replaying it.
+
+        External plugins and normal Harness settings remain owned by Harness.
+        Only active recorded patch paths belong to our file contract here.
+        Inactive adapter snapshots are not a prerequisite for official use.
+        """
+        self.verify_idle()
+        value, core = self.load(), self.core.load()
+        if any(record['enabled'] != (name in selection) for name, record in value['records'].items()):
+            return False
+        if core and core['mode'] != ('plugin' if self.core.adapter.plugin in selection else 'native'):
+            return False
+        self.check_host_identity(selection, value)
+        self.check_versions(plugins, selection, recovery=False)
+        expected = self.recorded_state(value)
+        owned = {change['key'] for record in value['records'].values() if record['enabled']
+                 for change in self.read_object(record['delta'])['changes']}
+        for key in owned:
+            if expected is None or not self.equal(self.actual(key), expected.get(key)):
+                raise TrackingError('正在启用的受管补丁文件已变化：' + key)
+        if self.core.adapter.plugin in selection:
+            if core is None:
+                raise TrackingError('缺少已启用适配器的补丁记录。')
+            self.versions.verify_adapter(core, self.core.adapter.plugin, recovery=False)
+            self.core.verify_files(core)
+        self.manager.require_stopped()
+        if self.manager.manifest_path.read_bytes() != manifest or self.load() != value or self.core.load() != core:
+            raise TrackingError('校验期间配置或补丁记录已变化，请刷新后重试。', code='revision_conflict')
+        return True
+
     def check_session_host(self, session):
         """An install recording must never absorb an official host replacement.
 
@@ -536,10 +567,10 @@ class PluginTracking:
                 raise TrackingError('上次组合切换尚未完成，请先应用当前组合以完成恢复，再开始记录。')
             raw, obj, bundles = self.manager.manifest()
             existing = self.manager.discover(obj, bundles)
-            unknown = [p['id'] for p in existing if p['id'] not in value['records'] and not is_adapter(p['id'])
+            unknown = [p['id'] for p in existing if p['enabled'] and p['id'] not in value['records'] and not is_adapter(p['id'])
                        and p['id'] not in value.get('suspended', {})]
             if unknown:
-                raise TrackingError('已存在没有安装前记录的插件，不能把未知改动当作原始文件：' + '、'.join(unknown))
+                raise TrackingError('请先在 Harness 内停用自行管理的插件，再记录新的补丁：' + '、'.join(unknown))
             self.check_versions(existing, [p['id'] for p in existing if p['enabled']])
             if core_state and self.core.adapter.plugin in bundles:
                 self.versions.verify_adapter(core_state, self.core.adapter.plugin)

@@ -61,7 +61,7 @@ class SwitchPlan:
                            or combination.get('adapterRevision') != core_state['revision']):
             return False
         registered = set(old['records'])
-        if any(p['id'] not in registered and p['id'] != self.core.adapter.plugin for p in plugins):
+        if any(p['enabled'] and p['id'] not in registered and p['id'] != self.core.adapter.plugin for p in plugins):
             return False
         report_progress('packages', '校验已启用插件及依赖')
         host = self.tracker.versions.hash(Path(self.manager.settings['executable']))

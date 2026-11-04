@@ -137,10 +137,10 @@ class Maintenance:
             suspended = self.tracker.load().get('suspendedPackages', {})
             reasons = []
             if name not in records and not is_adapter(name) and name not in suspended:
-                reasons.append('此插件没有安装前记录，无法确认和还原其文件修改。')
+                reasons.append('此插件由 Harness 管理，请在 Harness 内更新或卸载。')
             for p in plugins:
-                if p['id'] not in records and not is_adapter(p['id']) and p['id'] not in suspended:
-                    reasons.append('存在未记录插件：' + p['id'])
+                if p['enabled'] and p['id'] not in records and not is_adapter(p['id']) and p['id'] not in suspended:
+                    reasons.append('请先在 Harness 内停用自行管理的插件：' + p['id'])
                 if p['id'] == name:
                     continue
                 meta = json.loads((Path(p['path']) / 'package.json').read_bytes())

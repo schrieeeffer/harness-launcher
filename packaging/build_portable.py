@@ -14,7 +14,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.4.3'
+VERSION = '0.4.4'
 PYTHON = '3.13.17'
 RUNTIME_SHA = '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38'
 MODULES = '''adapters bootstrap.ps1 cache_gc catalog domain errors file_view host_modules install_sources installer_policy launch.vbs launcher maintenance
@@ -56,7 +56,7 @@ def build():
         shutil.copyfile(ROOT / name, stage / name)
     (stage / 'packaging').mkdir()
     shutil.copyfile(ROOT / 'packaging/README.md', stage / 'packaging/README.md')
-    quickstart = '''Harness Launcher 0.4.3 — Windows 10/11 64 位便携版
+    quickstart = '''Harness Launcher 0.4.4 — Windows 10/11 64 位便携版
 
 1. 先安装并至少打开一次 DeepSeek Harness 官方桌面版。
 2. 将本 ZIP 完整解压到你自己的文件夹，例如 D:\\Apps\\HarnessLauncher。
@@ -89,7 +89,7 @@ def build():
                     '/reference:System.Windows.Forms.dll', '/out:' + str(stage / 'Harness Launcher.exe'),
                     str(ROOT / 'packaging/Launcher.cs')], check=True)
     subprocess.run([str(runtime / 'python.exe'), '-B', '-c',
-        "import launcher,maintenance,cache_gc,runtime_repair,official_host,ssl; assert launcher.VERSION == '0.4.3'; print('Portable runtime imports OK')"],
+        "import launcher,maintenance,cache_gc,runtime_repair,official_host,ssl; assert launcher.VERSION == '0.4.4'; print('Portable runtime imports OK')"],
         cwd=stage, check=True)
     (stage / 'BUILD.json').write_text(json.dumps({'version': VERSION, 'python': PYTHON,
         'pythonDownloadSHA256': RUNTIME_SHA, 'sourceCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),

@@ -86,7 +86,7 @@ function renderPlugins() {
     const icon = element('div', 'plugin-icon tone-' + tone(p.id), p.id.split('/').pop().replace(/^dsh-/, '').slice(0, 1).toUpperCase());
     const info = element('div', 'plugin-info'); const heading = element('div', 'plugin-heading');
     heading.append(element('strong', '', p.id), element('span', 'badge version', versionLabel(p.version)));
-    if (!p.suspended) heading.append(element('span', 'badge' + (p.tracking !== 'untracked' ? ' on' : ' warn'), p.id === model.server?.tracking?.session?.plugin ? '安装记录进行中' : p.tracking === 'auto' ? '已自动记录补丁' : p.tracking === 'builtin' ? '支持自动还原补丁' : '未记录安装前状态'));
+    if (!p.suspended) heading.append(element('span', 'badge' + (p.management === 'official' || p.tracking !== 'untracked' ? ' on' : ' warn'), p.management === 'official' ? '由 Harness 管理' : p.id === model.server?.tracking?.session?.plugin ? '安装记录进行中' : p.tracking === 'auto' ? '已自动记录补丁' : p.tracking === 'builtin' ? '独立补丁管理' : '未记录安装前状态'));
     if (!p.available) heading.append(element('span', 'badge error', '文件缺失'));
     if (p.suspended) heading.append(element('span', 'badge warning', '待重新验证'));
     else if (model.server.enabled.includes(p.id)) heading.append(element('span', 'badge success', '当前已启用'));
@@ -95,7 +95,10 @@ function renderPlugins() {
     const pathButton = element('button', '', '查看路径'); const path = element('p', 'plugin-description plugin-path', p.path);
     pathButton.onclick = () => { path.classList.toggle('expanded'); pathButton.textContent = path.classList.contains('expanded') ? '收起路径' : '查看路径'; };
     meta.append(element('span', '', '·'), pathButton); info.append(heading, description, meta, path);
+    if (p.management === 'official') info.append(element('p', 'plugin-description', '在 Harness 内安装、更新和启停。启动器会保留当前配置。'));
     const label = element('label', 'switch'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = model.draft.ids.includes(p.id); checkbox.dataset.pluginToggle = 'true'; checkbox.dataset.available = String(p.available && !p.suspended); checkbox.disabled = model.operation.busy || (!p.available || p.suspended) && !checkbox.checked; checkbox.setAttribute('aria-label', '加载 ' + p.id);
+    checkbox.dataset.official = String(p.management === 'official');
+    if (p.management === 'official') { checkbox.disabled = true; label.title = '请在 Harness 内启用或停用此插件'; }
     checkbox.onchange = () => store.dispatch({type: 'draft/toggle', id: p.id, checked: checkbox.checked});
     label.append(checkbox, element('span', 'switch-track')); card.append(icon, info, label); $('plugins').append(card);
   }
@@ -110,12 +113,14 @@ function updateSummary() {
   $('refresh').disabled = model.operation.busy || model.polling;
   $('selectAll').disabled = $('selectNone').disabled = model.operation.busy;
   document.querySelectorAll('[data-preset], [data-selection-control]').forEach(button => button.disabled = model.operation.busy);
-  document.querySelectorAll('[data-plugin-toggle]').forEach(input => input.disabled = model.operation.busy || input.dataset.available !== 'true' && !input.checked);
+  document.querySelectorAll('[data-plugin-toggle]').forEach(input => input.disabled = model.operation.busy || input.dataset.official === 'true' || input.dataset.available !== 'true' && !input.checked);
   document.querySelectorAll('[data-restore]').forEach(button => button.disabled = !capabilities.canRestore);
   if (!model.server) return;
   const disconnected = model.connection.status !== 'online';
   $('selectedCount').textContent = model.draft.ids.length;
-  const titles = {current: '当前配置', none: '原生模式（全部关闭）', all: '全部可用插件', custom: '自定义组合', scheme: model.draft.scheme};
+  const titles = {current: '当前配置', none: capabilities.externalActive ? '关闭受管插件' : '原生模式（全部关闭）', all: '全部可用插件', custom: '自定义组合', scheme: model.draft.scheme};
+  $('nativePresetLabel').textContent = titles.none;
+  $('selectNone').textContent = capabilities.externalActive ? '关闭受管插件' : '全部关闭';
   $('selectionTitle').textContent = titles[model.draft.mode] || '自定义组合';
   $('selectionTitle').title = $('selectionTitle').textContent;
   $('selectionDescription').textContent = '开关只调整待选组合；点击启动会自动应用。也可仅应用，不启动 Harness。';
@@ -140,6 +145,14 @@ function updateSummary() {
   const operationText = currentOperation ? '正在执行：' + (operationNames[currentOperation.kind] || currentOperation.kind) + ' · ' + Math.floor((currentOperation.durationMs || 0) / 1000) + ' 秒' : '正在处理，请稍候…';
   $('draftStatus').textContent = disconnected ? '连接恢复并读取实际状态后才能操作' : model.operation.busy ? operationText : missing ? '未找到 Harness 程序 · 请先修正应用路径' : recording ? model.server?.tracking?.session?.error ? '安装记录需要处理' : '安装记录自动完成中' : model.server.running ? '切换前请完全退出 Harness' : hasUntracked() ? '存在未记录插件 · 组合切换已暂停' : hostNeedsVerification ? '官方更新后需验证基线 · 安装时先校验' : isChanged() || needsPatchSwitch() ? '待应用 · 点击启动会自动应用' : '空闲 · 与当前配置一致';
   $('draftStatus').title = $('draftStatus').textContent;
+  if (capabilities.externalActive && !model.operation.busy && !recording) {
+    if (!model.server.running) {
+      $('draftStatus').textContent = isChanged() || needsPatchSwitch() ? '先在 Harness 内停用自行管理的插件，再切换补丁组合' : '按官方当前配置启动 · 自制插件由 Harness 管理';
+      $('draftStatus').title = $('draftStatus').textContent;
+    }
+    $('patchTitle').textContent = '保留 Harness 当前配置';
+    $('patchDescription').textContent = '自行安装的插件继续在 Harness 内安装、更新和启停。切换受管补丁前，请先在 Harness 内停用这些插件。';
+  }
   $('launch').title = disconnected ? '请先恢复连接并读取实际状态' : recording ? '安装记录完成后才能切换组合或重新启动' : model.server.running ? '请先退出 Harness（包括托盘）' : missing ? '请在设置中确认应用路径' : hasUntracked() ? '已有插件缺少安装前记录，组合切换已暂停' : '校验当前组合；如有选择变更，自动应用后启动 Harness';
   $('apply').textContent = model.draft.ids.length ? '仅应用，不启动' : '仅还原，不启动';
   $('apply').title = '把待选组合写入配置并同步补丁，不启动 Harness；直接点击启动也会自动完成这些操作。';
@@ -249,7 +262,10 @@ function renderRecords() {
     return recordRow(name + ' · v' + record.version, [record.count + ' 处差异 · ' + (record.enabled ? '补丁已启用' : '补丁已停用'), ...(record.baseSelection.length ? ['记录时的基础组合：' + record.baseSelection.join('、')] : []), ...(record.historyCount ? ['保留 ' + record.historyCount + ' 份历史记录'] : [])], upgrade);
   }));
   if (!entries.length) $('trackingRecords').append(element('p', 'empty', '还没有通用记录。通过「手动添加」或「发现插件」安装的插件会出现在这里。'));
-  const plugins = model.server?.plugins || [], suspended = plugins.filter(p => p.suspended), builtin = plugins.filter(p => p.tracking === 'builtin' && !p.suspended), untracked = plugins.filter(p => p.tracking === 'untracked' && !p.suspended && p.id !== session?.plugin);
+  const plugins = model.server?.plugins || [], suspended = plugins.filter(p => p.suspended), builtin = plugins.filter(p => p.tracking === 'builtin' && !p.suspended), untracked = plugins.filter(p => p.tracking === 'untracked' && p.management !== 'official' && !p.suspended && p.id !== session?.plugin);
+  const official = plugins.filter(p => p.management === 'official');
+  $('officialGroup').hidden = !official.length;
+  $('officialRecords').replaceChildren(...official.map(p => recordRow(p.id + ' · ' + versionLabel(p.version), ['在 Harness 内安装、更新和启停；启动器保留当前配置。'])));
   $('suspendedGroup').hidden = !suspended.length;
   $('suspendedRecords').replaceChildren(...suspended.map(p => recordRow(p.id + ' · ' + versionLabel(p.version), [p.suspended])));
   $('builtinGroup').hidden = !builtin.length; $('untrackedGroup').hidden = !untracked.length; $('untrackedCount').textContent = untracked.length;
@@ -632,6 +648,12 @@ function renderMaintenance() {
   }
   $('maintenanceList').replaceChildren();
   for (const plugin of model.server?.plugins || []) {
+    if (plugin.management === 'official') {
+      const row = element('div', 'maintenance-row');
+      row.append(element('strong', '', plugin.id + ' · ' + versionLabel(plugin.version)), element('p', 'small muted', '由 Harness 管理。请在 Harness 内更新或卸载，本地源码目录会继续保留。'));
+      $('maintenanceList').append(row);
+      continue;
+    }
     const cached = maintenanceUI.updates.find(row => row.name === plugin.id);
     const update = cached?.installed === plugin.version && (cached.status !== 'revalidate' || plugin.suspended) ? cached : null;
     const row = element('div', 'maintenance-row');

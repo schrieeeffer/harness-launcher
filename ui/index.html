@@ -42,7 +42,7 @@
     <nav class="side-nav side-main" aria-label="启动组合">
       <div class="side-label">快速选择</div>
       <button class="nav active" data-preset="current"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span>当前配置</span></button>
-      <button class="nav" data-preset="none"><svg class="icon" aria-hidden="true"><use href="#i-power"/></svg><span>原生模式（全部关闭）</span></button>
+      <button class="nav" data-preset="none"><svg class="icon" aria-hidden="true"><use href="#i-power"/></svg><span id="nativePresetLabel">原生模式（全部关闭）</span></button>
       <button class="nav" data-preset="all"><svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg><span>全部可用插件</span></button>
 
       <div class="side-label saved-label">
@@ -468,6 +468,12 @@
         <h3>内置适配</h3>
         <p class="small muted">使用启动器自带的专用适配器还原，不走通用记录。</p>
         <div id="builtinRecords" class="record-list"></div>
+      </section>
+
+      <section id="officialGroup" class="record-group" hidden>
+        <h3>由 Harness 管理</h3>
+        <p class="small muted">自行创建或安装的插件继续在 Harness 内管理。启动器保留其加载配置；切换受管补丁组合前，请先在 Harness 内停用它们。</p>
+        <div id="officialRecords" class="record-list"></div>
       </section>
 
       <section id="untrackedGroup" class="record-group" hidden>

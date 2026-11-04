@@ -38,7 +38,7 @@ from verification_cache import VerifiedContentCache
 from runtime_repair import RuntimeRepair
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 # AppData can present a per-file MSIX overlay to a packaged caller and a
 # different file to Explorer. A home directory has one stable physical root.
 DATA = Path.home() / ".harness-launcher"
@@ -385,6 +385,11 @@ class Manager:
             for plugin in plugins:
                 plugin['tracking'] = ('builtin' if is_adapter(plugin['id']) else 'auto' if plugin['id'] in tracked else 'untracked')
                 plugin['suspended'] = self.tracking.load().get('suspended', {}).get(plugin['id'], '')
+                plugin['management'] = 'launcher' if plugin['id'] in tracked or is_adapter(plugin['id']) or plugin['suspended'] else 'official'
+            external = {p['id'] for p in plugins if p['management'] == 'official'}
+            patch_mode['unknown'] = [name for name in patch_mode['unknown'] if name not in external]
+            if external.intersection(bundles):
+                patch_mode['verifiedNative'] = False
             exists = Path(self.settings["executable"]).is_file()
             host_health = self.official_host.status() if exists else {'status': 'blocked', 'message': '找不到 Harness 程序。'}
             if host_health['status'] in ('changed', 'blocked'):
@@ -417,6 +422,14 @@ class Manager:
         unknown = set(selection) - valid
         if unknown:
             raise MenuError("以下插件缺失或不可用，请刷新后重选：" + "、".join(sorted(unknown)))
+        external = self.official_plugins(plugins)
+        active = {p['id'] for p in external if p['enabled']}
+        if set(selection).intersection(p['id'] for p in external) != active:
+            raise MenuError('自行安装的插件由 Harness 管理，请在 Harness 内启用或停用；启动器保留其当前配置。',
+                            code='official_plugin_managed')
+        if active and set(selection) != {p['id'] for p in plugins if p['enabled']}:
+            raise MenuError('请先在 Harness 内停用自行管理的插件，再切换启动器记录的补丁组合。当前配置可以直接启动。',
+                            code='official_plugin_active')
         suspended = self.tracking.load().get('suspended', {})
         if any(name in suspended for name in selection):
             raise MenuError('以下插件尚未完成当前官方版本验证，请在“更新与卸载”检查更新并重新验证：' + '、'.join(name for name in selection if name in suspended),
@@ -425,6 +438,11 @@ class Manager:
     def active_plugins(self, plugins):
         suspended = self.tracking.load().get('suspended', {})
         return [p for p in plugins if p['id'] not in suspended]
+
+    def official_plugins(self, plugins):
+        value = self.tracking.load()
+        return [p for p in plugins if p['id'] not in value['records'] and not is_adapter(p['id'])
+                and p['id'] not in value.get('suspended', {})]
 
     def backup(self, raw, bundles, reason):
         stamp = datetime.now().astimezone()
@@ -467,11 +485,11 @@ class Manager:
         tracker = self.tracking
         report_progress('check', '检查安装记录与配置')
         tracker.guard(check_files=True)
-        registered = set(tracker.load()['records'])
-        unknown = [p['id'] for p in plugins if not is_adapter(p['id']) and p['id'] not in registered]
-        if unknown:
-            raise PatchError('这些插件缺少安装前记录，无法可靠切换文件组合：' + '、'.join(unknown) +
-                             '。请先恢复干净的安装，再通过启动器安装并自动记录；不能用安装后的快照补记。')
+        external = self.official_plugins(plugins)
+        if any(p['enabled'] for p in external):
+            raise PatchError('自行管理的插件仍在启用，请保留当前配置启动，或先在 Harness 内停用后再切换补丁。')
+        external_names = {p['id'] for p in external}
+        plugins = [p for p in plugins if p['id'] not in external_names]
         planner = SwitchPlan(tracker)
         plan = planner.prepare(selection, plugins, before, after, native)
         return planner.execute(plan)
@@ -551,8 +569,11 @@ class Manager:
             # An already sealed combination can be launched without undoing and
             # replaying every layer. Revalidate live file identities each time.
             try:
+                official_configuration = bool(launch and not changed and self.official_plugins(plugins))
                 current_verified = (launch and not changed and
-                                    SwitchPlan(self.tracking).verify_current(selection, plugins, raw))
+                                    (self.tracking.verify_official_configuration(selection, plugins, raw)
+                                     if official_configuration else
+                                     SwitchPlan(self.tracking).verify_current(selection, plugins, raw)))
             except PatchError as exc:
                 raise MenuError(str(exc), code=exc.code, details=exc.details,
                                 recovery=exc.recovery, retryable=exc.retryable) from exc
@@ -577,7 +598,7 @@ class Manager:
                     self.spawn_harness()
             except PatchError as exc:
                 raise MenuError(str(exc), code=exc.code, details=exc.details, recovery=exc.recovery, retryable=exc.retryable) from exc
-            except OSError as exc:
+            except (OSError, LauncherError) as exc:
                 if receipt:
                     try:
                         self.rollback_layers(receipt)
@@ -586,7 +607,9 @@ class Manager:
                                     'recovery': rollback_error.recovery, 'retryable': rollback_error.retryable}
                                    if isinstance(rollback_error, PatchError) else {})
                         raise MenuError('启动失败且补丁回滚未完成：' + str(rollback_error), **details) from exc
-                raise MenuError(("启动失败，已恢复切换前配置：" if receipt else "无法完成切换，已停止操作：") + str(exc)) from exc
+                details = ({'code': exc.code, 'details': exc.details, 'recovery': exc.recovery,
+                            'retryable': exc.retryable} if isinstance(exc, LauncherError) else {})
+                raise MenuError(("启动失败，已恢复切换前配置：" if receipt else "无法完成切换，已停止操作：") + str(exc), **details) from exc
             result = {"message": ("启动请求已发送" if launch else "插件配置已保存") +
                       (f" · 已选择 {len(selection)} 个额外插件" if selection else " · 不加载额外插件"),
                       "changed": changed, "launched": launch,
@@ -614,6 +637,8 @@ class Manager:
             return result
 
     def spawn_harness(self):
+        from installer_policy import ensure_adapter_isolation
+        ensure_adapter_isolation(self)
         exe = Path(self.settings['executable'])
         env = os.environ.copy()
         env['DSH_HOME'] = str(self.home)

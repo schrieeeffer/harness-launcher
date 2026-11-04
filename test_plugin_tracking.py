@@ -385,7 +385,7 @@ class GenericTrackingTests(unittest.TestCase):
         (self.app / 'main.js').write_bytes(b'A')
         self.accept()
         before = self.manifest.read_bytes()
-        with patch('launcher.subprocess.Popen', side_effect=OSError('spawn failed')):
+        with patch('installer_policy.ensure_adapter_isolation'), patch('launcher.subprocess.Popen', side_effect=OSError('spawn failed')):
             with self.assertRaises(MenuError):
                 self.apply([], launch=True)
         self.assertEqual((self.app / 'main.js').read_bytes(), b'A')
@@ -620,10 +620,10 @@ class GenericTrackingTests(unittest.TestCase):
             self.apply([])
         self.assertEqual(self.manifest.read_bytes(), raw)
 
-    def test_untracked_plugin_blocks_non_native_combination_too(self):
+    def test_launcher_cannot_drop_an_official_managed_plugin_during_switch(self):
         self.install_fixture('plugin-untracked')
         raw = self.manifest.read_bytes()
-        with self.assertRaisesRegex(MenuError, '缺少安装前记录'):
+        with self.assertRaisesRegex(MenuError, '由 Harness 管理'):
             self.apply(['dsh-purge'])
         self.assertEqual(self.manifest.read_bytes(), raw)
 

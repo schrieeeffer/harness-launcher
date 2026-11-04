@@ -24,6 +24,36 @@ class Element {
 }
 const sourceProof = (source='dsh-pet@0.3.8') => ({enabled:true,source,token:'source-proof',expiresAt:Date.now()/1000+300,reason:'verified'});
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => structuredClone(data)});
+
+test('official-managed plugin keeps its current loading state without blocking launch', async () => {
+  const ui = await app();
+  ui.state.plugins.push({id:'@local/created',description:'local',version:'1.0',available:true,tracking:'untracked',management:'official'});
+  ui.state.enabled.push('@local/created');
+  await ui.run('refresh(true)');
+  assert.equal(ui.nodes.get('launch').disabled, false);
+  assert.match(ui.nodes.get('plugins').textContent, /由 Harness 管理/);
+  assert.match(ui.nodes.get('draftStatus').textContent, /官方当前配置/);
+  ui.run("store.dispatch({type:'draft/toggle',id:'@local/created',checked:false})");
+  assert.ok(ui.run("model.draft.ids.includes('@local/created')"));
+  ui.run("store.dispatch({type:'draft/preset',preset:'none'})");
+  assert.deepEqual(Array.from(ui.run('model.draft.ids')), ['@local/created']);
+  assert.equal(ui.nodes.get('selectionTitle').textContent, '关闭受管插件');
+  await ui.run('refresh()');
+  assert.equal(ui.run('model.draft.mode'), 'none');
+  assert.equal(ui.nodes.get('launch').disabled, true);
+  ui.run("store.dispatch({type:'draft/preset',preset:'current'})");
+  assert.equal(ui.nodes.get('launch').disabled, false);
+});
+
+test('select-all does not activate an externally managed disabled plugin', async () => {
+  const ui = await app();
+  ui.state.plugins.push({id:'@local/created',description:'local',version:'1.0',available:true,tracking:'untracked',management:'official'});
+  await ui.run('refresh(true)');
+  ui.run("store.dispatch({type:'draft/preset',preset:'all'})");
+  assert.deepEqual(Array.from(ui.run('model.draft.ids')), ['plugin-a']);
+  assert.equal(ui.nodes.get('launch').disabled, false);
+});
+
 async function app() {
   const nodes = new Map([...fs.readFileSync('ui/index.html', 'utf8').matchAll(/\bid="([^"]+)"/g)].map(m => [m[1], new Element()]));
   const document = {
