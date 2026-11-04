@@ -142,9 +142,20 @@ class VersionStore:
                   'executable': entry['executable']} if entry['type'] == 'file' else {'type': 'dir'})
                 for path, entry in view.entries.items() if path != root}
 
-    def resolve_dependency(self, root, name):
+    def resolve_dependency(self, root, name, *, directories=None):
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise PatchError('插件依赖名称无效：' + str(name))
+        def present(path):
+            if directories is None:
+                return True
+            parent = path.parent
+            if parent not in directories:
+                try:
+                    with os.scandir(parent) as children:
+                        directories[parent] = {child.name.casefold() for child in children}
+                except (FileNotFoundError, NotADirectoryError):
+                    directories[parent] = set()
+            return path.name.casefold() in directories[parent]
         # Node resolves dependencies from the real package directory upwards.
         for directory in (root, *root.parents):
             if directory.name == 'node_modules':
@@ -153,8 +164,11 @@ class VersionStore:
             # CommonJS resolves files before package directories. A loose
             # module can shadow a valid package at this or a higher level;
             # recording that other package would verify the wrong runtime code.
-            if any(Path(str(candidate) + suffix).is_file() for suffix in ('', '.js', '.json', '.node')):
+            candidates = [Path(str(candidate) + suffix) for suffix in ('', '.js', '.json', '.node')]
+            if any(present(path) and path.is_file() for path in candidates):
                 raise PatchError('插件依赖被无清单模块遮蔽，无法保存完整版本：' + str(candidate))
+            if not present(candidate):
+                continue
             if (candidate / 'package.json').is_file():
                 return candidate.resolve()
             if any((candidate / ('index' + suffix)).is_file() for suffix in ('.js', '.json', '.node')):
@@ -166,6 +180,7 @@ class VersionStore:
             raise PatchError('插件名称无效，无法保存版本。')
         root = Path(root).resolve() if root is not None else (self.profile / 'node_modules' / name).resolve()
         queue, ids, packages = [root], {root: '0'}, {}
+        directories, resolved_edges = {}, []
         while queue:
             path = queue.pop(0)
             meta = json.loads((path / 'package.json').read_bytes())
@@ -180,7 +195,8 @@ class VersionStore:
                 if not isinstance(section, dict):
                     raise PatchError('插件依赖清单无效：' + str(path))
             for dep in sorted(set(required) | set(optional) | set(peers)):
-                resolved = self.resolve_dependency(path, dep)
+                resolved = self.resolve_dependency(path, dep, directories=directories)
+                resolved_edges.append((path, dep, resolved))
                 if resolved is None:
                     if dep in peers and dep not in required and dep not in optional:
                         dsh = meta.get('dsh', {})
@@ -205,6 +221,13 @@ class VersionStore:
                 raise PatchError('读取期间插件依赖清单发生变化：' + str(path))
             packages[package_id] = {'name': meta.get('name'), 'version': str(meta.get('version', '未知')),
                                     'files': files, 'dependencies': dependencies}
+        # Reuse directory listings only inside one pass. A fresh second pass
+        # catches new shadow modules, removed dependencies and retargeted links;
+        # neither negative lookups nor resolution results persist across calls.
+        fresh_directories = {}
+        for path, dep, expected in resolved_edges:
+            if self.resolve_dependency(path, dep, directories=fresh_directories) != expected:
+                raise PatchError('读取期间插件依赖路径发生变化：' + dep)
         if packages['0']['name'] != name:
             raise PatchError('版本记录中的插件包名不匹配：' + name)
         result = {'format': 1, 'plugin': name, 'source': source, 'packages': packages}

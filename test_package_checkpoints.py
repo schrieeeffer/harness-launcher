@@ -138,6 +138,32 @@ class PackageCheckpointTests(unittest.TestCase):
             (self.code / '0.js').write_bytes(b'new')
             self.assertNotEqual(self.capture(), expected)
 
+    def test_shadow_module_added_during_package_read_is_rejected(self):
+        original = self.versions.files
+        def read(root, store=True):
+            result = original(root, store)
+            if root == self.dependency:
+                (self.dependency.parent / 'shared.js').write_bytes(b'shadow')
+            return result
+        with patch.object(self.versions, 'files', side_effect=read), self.assertRaisesRegex(PatchError, '遮蔽'):
+            self.capture()
+
+    def test_new_optional_dependency_cannot_reuse_an_earlier_negative_lookup(self):
+        manifest = self.package / 'package.json'
+        value = json.loads(manifest.read_bytes())
+        value['optionalDependencies'] = {'late': '1.0.0'}
+        manifest.write_text(json.dumps(value))
+        original = self.versions.files
+        def read(root, store=True):
+            result = original(root, store)
+            if root == self.dependency:
+                late = self.dependency.parent / 'late'
+                late.mkdir()
+                (late / 'package.json').write_text(json.dumps({'name': 'late', 'version': '1.0.0'}))
+            return result
+        with patch.object(self.versions, 'files', side_effect=read), self.assertRaisesRegex(PatchError, '依赖路径发生变化'):
+            self.capture()
+
     def test_launch_verifies_live_code_while_package_restore_verifies_its_blobs(self):
         reference = self.versions.package_snapshot('example-plugin')
         capsule = self.store.read_object(reference)
