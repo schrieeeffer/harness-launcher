@@ -13,7 +13,7 @@ import re
 import stat
 import time
 
-from patch_modes import PatchError, archive_file, file_hash, sha
+from patch_modes import ArchiveIndex, PatchError, archive_file, file_hash, sha
 from domain import ContentIdentity, DomainError
 from operations import report_progress
 from file_view import FileView
@@ -181,6 +181,7 @@ class VersionStore:
         root = Path(root).resolve() if root is not None else (self.profile / 'node_modules' / name).resolve()
         queue, ids, packages = [root], {root: '0'}, {}
         directories, resolved_edges = {}, []
+        archive_index = ArchiveIndex()
         while queue:
             path = queue.pop(0)
             meta = json.loads((path / 'package.json').read_bytes())
@@ -201,7 +202,8 @@ class VersionStore:
                     if dep in peers and dep not in required and dep not in optional:
                         dsh = meta.get('dsh', {})
                         client = dsh.get('client', {}) if isinstance(dsh, dict) else {}
-                        provided = self.host_dependency(dep, browser=isinstance(client, dict) and client.get('platform') == 'web')
+                        provided = self.host_dependency(dep, browser=isinstance(client, dict) and client.get('platform') == 'web',
+                                                        index=archive_index)
                         if provided:
                             dependencies[dep] = provided
                             continue
@@ -244,18 +246,18 @@ class VersionStore:
                     result['installMetadata'][name] = self.store.store_file(path, stamp) if store else self.hash(path)
         return result
 
-    def host_dependency(self, name, *, browser=False):
+    def host_dependency(self, name, *, browser=False, index=None):
         core = self.host_archive
         archive = core.official_archive(self.view)
         if archive is None:
             return None
         try:
             content = archive_file(archive, 'dsh/node_modules/' + name + '/package.json',
-                                   core.resources / 'app.asar.unpacked', self.view)
+                                   core.resources / 'app.asar.unpacked', self.view, index=index)
         except PatchError:
             if browser:
                 from host_modules import browser_peer
-                provided = browser_peer(core, archive, name, self.view)
+                provided = browser_peer(core, archive, name, self.view, index=index)
                 if provided:
                     return dict(provided, hostHash=self.hash(self.executable),
                                 archiveHash=self.view.hash(archive) if self.view else self.hash(archive))

@@ -53,10 +53,10 @@ class EntryScripts(HTMLParser):
             self.paths.append(str(path))
 
 
-def browser_peer(core, archive, name, view=None):
+def browser_peer(core, archive, name, view=None, *, index=None):
     prefix = 'dsh/node_modules/@deepseek-ai/dsh-web-frontend/'
     def read(path):
-        return archive_file(archive, prefix + path, core.resources / 'app.asar.unpacked', view)
+        return archive_file(archive, prefix + path, core.resources / 'app.asar.unpacked', view, index=index)
     try:
         manifest = read('package.json')
         meta = json.loads(manifest)

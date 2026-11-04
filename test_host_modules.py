@@ -5,9 +5,10 @@ import struct
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from host_modules import static_modules
-from patch_modes import PatchError
+from patch_modes import ArchiveIndex, PatchError, archive_file
 from storage import ContentStore
 from version_store import VersionStore
 
@@ -75,6 +76,35 @@ class BrowserPeerTests(unittest.TestCase):
         raw=self.archive.read_bytes();self.archive.write_bytes(raw[:-1]+b'!')
         with self.assertRaisesRegex(PatchError,'依赖缺失'):
             self.versions.package_snapshot('plugin-a')
+
+    def test_shared_index_reuses_only_identical_header_decoding(self):
+        index = ArchiveIndex()
+        entry = 'dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/index.js'
+        with patch('patch_modes.json.loads', wraps=json.loads) as decode:
+            for _ in range(2):
+                self.assertEqual(archive_file(self.archive, entry, self.profile, index=index), SCRIPT.encode())
+            self.assertEqual(decode.call_count, 1)
+        self.write_archive(SCRIPT.replace(':UI', ':UX'))
+        self.assertEqual(archive_file(self.archive, entry, self.profile, index=index), SCRIPT.replace(':UI', ':UX').encode())
+
+    def test_shared_index_rechecks_packed_and_unpacked_payloads(self):
+        for unpacked in (False, True):
+            with self.subTest(unpacked=unpacked):
+                data = b'good'
+                entry = {'size': 4, 'offset': '0', 'unpacked': unpacked,
+                         'integrity': {'algorithm': 'SHA256', 'hash': hashlib.sha256(data).hexdigest()}}
+                header = json.dumps({'files': {'item': entry}}).encode()
+                self.archive.write_bytes(struct.pack('<4I', 4, len(header)+8, len(header)+4, len(header))+header+data)
+                (self.profile / 'item').write_bytes(data)
+                index = ArchiveIndex()
+                self.assertEqual(archive_file(self.archive, 'item', self.profile, index=index), data)
+                if unpacked:
+                    (self.profile / 'item').write_bytes(b'evil')
+                else:
+                    raw = self.archive.read_bytes()
+                    self.archive.write_bytes(raw[:-4] + b'evil')
+                with self.assertRaisesRegex(PatchError, '完整性校验失败'):
+                    archive_file(self.archive, 'item', self.profile, index=index)
 
 
 if __name__=='__main__':unittest.main()

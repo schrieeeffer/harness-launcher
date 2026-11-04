@@ -141,7 +141,24 @@ def archive_info(archive, unpacked, verify=False, view=None):
         raise PatchError('无法验证保留的官方 app.asar，未修改应用。') from exc
 
 
-def archive_file(archive, name, unpacked, view=None):
+class ArchiveIndex:
+    """One capture's parsed directory, keyed by the actual header bytes.
+
+    Every read still opens the archive and reads its header. This only avoids
+    decoding unchanged JSON; payloads and unpacked files are never cached.
+    """
+    def __init__(self):
+        self.raw = None
+        self.tree = None
+
+    def parse(self, raw):
+        if self.raw != raw:
+            tree = json.loads(raw)
+            self.raw, self.tree = raw, tree
+        return self.tree
+
+
+def archive_file(archive, name, unpacked, view=None, *, index=None):
     """Read one host-provided package manifest without executing Electron."""
     try:
         with (view.open(archive) if view else archive.open('rb')) as stream:
@@ -149,7 +166,8 @@ def archive_file(archive, name, unpacked, view=None):
             if (header[0] != 4 or not 0 < header[3] < 32 * 1024 * 1024
                     or header[1] < header[3] + 8):
                 raise ValueError('header')
-            node = json.loads(stream.read(header[3]))
+            raw = stream.read(header[3])
+            node = index.parse(raw) if index is not None else json.loads(raw)
             for part in _archive_parts(name):
                 if not isinstance(node, dict) or not isinstance(node.get('files'), dict):
                     raise ValueError('directory')
