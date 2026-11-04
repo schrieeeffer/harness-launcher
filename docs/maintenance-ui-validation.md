@@ -1,5 +1,7 @@
 # 维护界面与普通插件实测
 
+启动性能已在 0.4.4 更新，最新三个场景为 23.0–25.7 秒，见[启动速度实测](startup-validation.md)。下文保留维护功能的实际过程及当时计时，便于核对更新、卸载和恢复结果。
+
 [返回首页](../README.md) · [维护操作指南](plugin-maintenance.md)
 
 测试日期：2026-11-03 至 2026-11-04。环境：Windows x64、Harness Launcher 0.4.3、官方 Harness 0.2.1-rc.5。本轮使用 dsh-pet 测试，保留 dsh-purge 的安装、禁用状态和记录。

@@ -4,14 +4,14 @@
 
 Choose the plugins you want to use, then start DeepSeek Harness. Save your usual combinations, switch back to the official native setup, and manage plugin updates and removal from one desktop panel.
 
-[Download for Windows](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.3) · [中文](README.md) · [Report a problem](https://github.com/schrieeeffer/harness-launcher/issues)
+[Download for Windows](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) · [中文](README.md) · [Report a problem](https://github.com/schrieeeffer/harness-launcher/issues)
 
-Version **0.4.3**, a community preview for Windows 10/11 x64. The portable archive includes its Python runtime. Install the official DeepSeek Harness desktop app first. This project is unaffiliated with DeepSeek.
+Version **0.4.4**, a community preview for Windows 10/11 x64. The portable archive includes its Python runtime. Install the official DeepSeek Harness desktop app first. This project is unaffiliated with DeepSeek.
 
 ## Get started
 
 1. Install and open the official Harness desktop app once.
-2. Download `Harness-Launcher-0.4.3-Windows-x64.zip` from [Releases](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.3).
+2. Download `Harness-Launcher-0.4.4-Windows-x64.zip` from [Releases](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4).
 3. Extract the whole archive to a folder of your choice.
 4. Double-click `Harness Launcher.exe`. No Python installation or terminal commands are needed.
 5. If Harness is not found, open Settings and use automatic detection or choose its executable.
@@ -19,12 +19,12 @@ Version **0.4.3**, a community preview for Windows 10/11 x64. The portable archi
 Keep the `runtime` and `ui` folders next to the executable. The archive contains the launcher; Harness and third-party plugins are installed separately. The executable is not commercially code-signed. A `SHA256SUMS.txt` file is provided with each release:
 
 ```powershell
-Get-FileHash .\Harness-Launcher-0.4.3-Windows-x64.zip -Algorithm SHA256
+Get-FileHash .\Harness-Launcher-0.4.4-Windows-x64.zip -Algorithm SHA256
 ```
 
 ## Everyday use
 
-![Choose a plugin combination in Harness Launcher](docs/images/maintenance-ui/10-overview.jpg)
+![Choose a plugin combination in Harness Launcher](docs/images/startup/launcher.jpg)
 
 You might use a pet and a balance widget while working, then need the official native interface to investigate a problem. Save those choices as separate combinations and select the one you need next time.
 
@@ -78,9 +78,17 @@ The launcher includes a dedicated adapter for purge's changes to the Harness arc
 
 Ordinary plugins use the general file-difference recorder. The purge adapter handles archive switching while using the same verification and recovery storage.
 
+Adapter build scripts stay disabled during ordinary plugin installation. Explicit maintenance of that adapter temporarily permits its selected, pinned source and then restores isolation. The policy belongs to the Harness profile and remains effective after the launcher exits.
+
 Two real enable/disable cycles and native restoration were completed with `dsh-purge 1.1.90` and `Harness 0.2.1-rc.5`; see the [purge validation record](docs/purge-source-audit.md). The current maintenance UI tests use pet and retain that purge installation.
 
 Use purge on its own when first installing, updating, or troubleshooting it. Once that setup works, try other combinations. A new official Harness version requires fresh compatibility verification before old patches can be enabled.
+
+## Plugins created inside Harness
+
+Plugins you create and install in Harness continue to use its official workflow. The launcher labels them **Managed by Harness**, preserves their current loading configuration, and leaves their source directories in place. Update and toggle these plugins inside Harness. Before switching a recorded patch combination, disable those plugins in Harness; their installed packages can remain.
+
+Normal user settings can change while an unrelated patch is disabled. Changes to a path owned by an active or requested patch still stop the switch. Version 0.4.4 fixes unrelated build approvals blocking local installs and normal user configuration being mistaken for patch damage. See the [coexistence validation](docs/official-plugin-coexistence.md).
 
 ## Official Harness updates
 
@@ -108,7 +116,13 @@ Turning a plugin off keeps its package installed for next time. Use Uninstall pl
 
 The daily launch target is about 30 seconds to a usable window after initial recording. Actual timing depends on disk performance, dependencies, and Harness itself. Installation and full maintenance checks have separate timings in the validation reports.
 
-The current pet 0.4.1 setup misses that target: enabling it took 101.6 seconds in the backend, and restarting the same combination took 80.5 seconds. Restoring the uninstall checkpoint took about 19 minutes. These remain performance limitations of this preview; see the [measured results](docs/maintenance-ui-validation.md).
+Version 0.4.4 reached a usable window in **28.1 seconds** for a pet restart, **28.5 seconds** when turning pet off, and **28.8 seconds** when turning it back on. These local samples used pet 0.4.1 and official Harness 0.2.1-rc.5. Timings include Harness loading and window observation.
+
+Package directory checkpoints now cover routine verification; runtime and CLI checks use separate scopes, and each package capture reuses parsed archive headers. File contents and dependency resolution are still checked. Changed files or incomplete filesystem journals trigger fresh reads.
+
+![Pet running after the startup checks](docs/images/startup/pet.jpg)
+
+See the [startup measurements](docs/startup-validation.md) for the method and scope. Full uninstall-checkpoint restoration previously took about 19 minutes and was not rerun in this optimization round. First captures and maintenance operations have separate costs.
 
 When reporting an issue, include the Harness and plugin versions, the action you took, and the error message or screenshot. Do not include credentials, private conversations, or local access tokens.
 
@@ -132,6 +146,7 @@ The portable builder uses an explicit file allowlist and includes file hashes an
 
 ## Documentation
 
+- [Startup performance and native restoration](docs/startup-validation.md)
 - [Maintenance UI and real pet validation](docs/maintenance-ui-validation.md)
 - [Plugin test records](docs/validation-0.4.3.md)
 - [Installation sources](docs/install-sources.md) and [plugin maintenance](docs/plugin-maintenance.md)

@@ -1,7 +1,7 @@
 # Architecture and data contract / 架构与数据契约
 
-This describes the 0.4.3 implementation. Runtime control data uses format 3.
-本文说明 0.4.3 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[验证记录](validation-0.4.3.md)。
+This describes the 0.4.4 implementation. Runtime control data uses format 3.
+本文说明 0.4.4 实现；运行时控制数据统一使用格式 3。本机约 30 秒目标的实测与边界见[启动实测](startup-validation.md)。
 
 ## Official update generations / 官方版本接续
 
@@ -23,7 +23,9 @@ This describes the 0.4.3 implementation. Runtime control data uses format 3.
 
 ![插件维护与恢复流程](images/maintenance-flow.svg)
 
-`installer_policy.py` 在安装、升级和卸载期间通过官方 pnpm 配置接口临时禁止非目标插件构建，完成后恢复这些插件原来的策略；目标包的精确来源授权保留。维护失败沿用同一份文件检查点恢复。普通插件卸载只使用自身记录，归档适配器的检查限定在对应插件。
+`installer_policy.py` 通过官方 pnpm 配置接口隔离构建脚本。普通非目标插件在维护期间临时禁止构建，结束后恢复原策略；适配器登记的特殊插件则持久禁用自动构建，只有显式维护时才临时授权固定来源。首次修改前备份原配置，写入后回读验证；保留其他包的策略。子进程超时且可能仍在写入时，交由维护恢复处理，避免并发改写。
+
+未经过启动器记录的普通插件标记为 `management: official`，由 Harness 管理源码、安装和启停。当前组合可直接启动，仍核对宿主、程序范围及活动补丁文件。它们停用后不再阻止其他已记录插件切换。用户配置范围按活动和目标补丁的路径归属检查；无关设置可变化，旧补丁重启时仍要求匹配其记录中的原始内容。新的用户配置基线保存为新对象，旧对象继续供恢复使用。`profile_config.py` 使用官方 YAML 解析器读取组件结构，不执行动态表达式；只递归组件组和插入项，模型及提供商配置作为组件自己的数据保留。程序与解包文件内容一致时，用户设置变化不会触发归档成员重复校验。
 
 `CacheGC` 每次确认前先枚举一次对象名称，再遍历记录引用，避免为官方清单中的每个哈希反复访问文件系统。最终候选限定为此次枚举中的对象；确认执行时重新核对引用、路径与内容。扫描期间新建的对象留到后续清理。
 
@@ -31,7 +33,7 @@ This describes the 0.4.3 implementation. Runtime control data uses format 3.
 
 `VersionStore` 对 Web 插件的 peer 依赖还检查官方前端静态模块注册表（`host_modules.py`）：仅识别从 HTML 入口加载、传给启动加载器的受支持字面量表，不执行 JavaScript。结果绑定前端清单、入口文件、HTML、ASAR 与 EXE 内容；未知结构不授权，更新后重新验证。状态轮询使用已发布的记录器及原子登记文件，不等待保存文件时的全局锁；实际写操作仍经过该锁。
 
-![当前模块架构图](images/architecture-0.4.3.svg)
+![当前模块架构图](images/architecture.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
@@ -63,6 +65,9 @@ flowchart TB
     NB --> NV["每次复核宿主、配置及官方文件\n仅原生配置允许启动"]
     NV --> RUN
     API --> PT["PluginTracking\n安装前后记录与版本约束"]
+    API --> OFF["Harness 自行管理的插件\n保留当前加载配置；程序文件和活动补丁继续检查"]
+    OFF --> RUN
+    MT --> POLICY["脚本策略\n普通安装持久禁止特殊插件构建；显式维护临时授权"]
     PT --> PIN["安装会话：固定官方归档与其他插件依赖\n混合更新暂停；会话声明更新保护能力"]
     PT --> VS["VersionStore\n插件依赖、版本、组合与原生基线"]
     SP --> FV["FileView\n只读文件视图、并发校验、组合预演"]
@@ -77,7 +82,10 @@ flowchart TB
     TC --> IDX["日志验证后复用路径、子目录索引与指纹\n每个目录最多两个位置；预演隔离"]
     TC --> VC
     VS --> CS["ContentStore\n按内容寻址的对象与双向恢复副本"]
-    VS --> IO["包、依赖与恢复副本\n最多 8 路校验；主线程报告真实计数"]
+    VS --> PKC["包目录检查点 + 两遍依赖解析\n排除范围属于缓存身份"]
+    PKC --> TC
+    VS --> ASAR["单次捕获共享 ASAR 目录解析\n实际目录字节与内容摘要继续检查"]
+    VS --> IO["安装与恢复完整核对包副本\n启动核对安装内容及副本存在"]
     CP --> IO
     IO --> CS
     CS --> DEDUP["先验证内容，再复用已有对象\n不为重复副本写临时文件和 fsync"]
@@ -96,7 +104,7 @@ flowchart TB
 
 ## Verification principle / 校验原理图
 
-![当前校验分支与 NTFS 缓存原理图](images/verification-principle-0.4.3.svg)
+![当前校验分支与 NTFS 缓存原理图](images/verification-principle.svg)
 
 <details>
 <summary>Mermaid source / 图源</summary>
@@ -130,7 +138,8 @@ flowchart TD
     D -->|否| F["扫描本次涉及的活动与暂存文件\n只读预演原生基线和目标组合"]
     F --> G["独立复核输入\n保存事务后执行，移动前校验"]
     G --> H["独立核验切换结果\n以已验证快照生成索引并提交"]
-    E --> H
+    E --> CV["执行前核对旧组合和目标依赖\n不在计划阶段重复扫描插件包"]
+    CV --> H
     C --> I["完成验证并确认运行条件"]
     H --> I
     I --> L{"是否启动？"}
@@ -176,6 +185,8 @@ own regression validation.
 图示描述已实现路径，详见[检查点设计](checkpoint-design.md)和[更新边界](host-updates.md)。
 内置补丁切换保留输入、移动前及输出校验。已发表窗口样本符合本机约 30 秒目标，不是严格上限；
 后续更新保护改动需要单独回归验证。
+
+0.4.4 的 pet 三场景实测为 23.0–25.7 秒到输入框可用。运行时与 CLI 使用独立校验范围；包目录索引纳入现有 NTFS 检查点。回滚对象与可丢弃的性能缓存分别存储，修改缓存不会改变恢复内容。
 
 ## Boundaries / 模块边界
 
@@ -229,7 +240,7 @@ tests, not scattered package-name branches.
 | Immutable packages, revisions, combinations and native baselines / 不可变包、版本、组合和原生基线 | Their existing `format: 1` contracts / 各自原有格式 1 | Content-addressed objects are independent of control-data versions / 对象格式独立于控制数据版本 |
 | Snapshot and delta objects / 快照及差异对象 | Stable existing JSON shape / 稳定 JSON 结构 | Explicit domain decoding; identity derives from canonical JSON / 领域解码，规范 JSON 决定内容标识 |
 | Portable schemes / 便携方案 | `harness-launcher-schemes-v1` | Package names only; bind local versions on import / 只传包名，导入时绑定本机版本 |
-| Optional NTFS verification cache / 可选 NTFS 校验缓存 | `format: 3` | Discard legacy/invalid cache and rebuild; never a recovery source / 旧格式或损坏时丢弃重建，不作为恢复来源 |
+| Optional NTFS verification cache / 可选 NTFS 校验缓存 | File cache `format: 3`; directory checkpoints `format: 4` | Discard legacy/invalid cache and rebuild; never a recovery source / 旧格式或损坏时丢弃重建，不作为恢复来源 |
 
 Settings and registry loaders preserve additive fields. Their `requiredFeatures`
 declares capabilities a reader must understand; unsupported requirements stop

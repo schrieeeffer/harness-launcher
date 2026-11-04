@@ -22,6 +22,6 @@ node --test test_ui.cjs
 python packaging/build_portable.py
 ```
 
-检查首次启动、相同组合、组合切换、更新冲突、升级失败、卸载和恢复。故障测试使用隔离安装；公开截图须隐藏会话、账号和其他个人内容；明确区分真实操作与隔离示例。CI 覆盖 Windows Python 3.12 和 3.13。当前发行验证见[验证记录](docs/validation-0.4.3.md)。
+检查首次启动、相同组合、组合切换、更新冲突、升级失败、卸载和恢复。故障测试使用隔离安装；公开截图须隐藏会话、账号和其他个人内容；明确区分真实操作与隔离示例。CI 覆盖 Windows Python 3.12 和 3.13。当前发行验证见[验证记录](docs/startup-validation.md)。
 
 发布前审计打包清单和哈希，验证便携 EXE，核对来源提交与 CI。不要将个人设置、令牌、会话、诊断日志或测试夹具打入发布包。详见[打包说明](packaging/README.md)。

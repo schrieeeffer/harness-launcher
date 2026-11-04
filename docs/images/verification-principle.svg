@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="950" viewBox="0 0 1180 950" role="img">
+<title>日常校验如何复用</title>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="#697499"/></marker></defs>
+<rect width="1180" height="950" rx="24" fill="#f6f7fb"/>
+<g font-family="Segoe UI,Microsoft YaHei,sans-serif" fill="#18233e">
+<text x="40" y="55" font-size="28" font-weight="700">日常校验如何复用</text>
+<text x="40" y="88" font-size="16" fill="#5d6882">复用已经核实的内容；新的文件变化仍进入检查。</text>
+<path d="M590 250V260H205V290" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 250V290" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 260H975V290" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M205 420V450H590V480" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 420V480" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M975 420V450H590" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 610V642H305V675" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<text x="350" y="636" fill="#5d6882" font-size="14">复用</text>
+<path d="M590 642H875V675" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<text x="760" y="636" fill="#5d6882" font-size="14">重新验证</text>
+<rect x="390" y="125" width="400" height="125" rx="14" fill="#edf0ff" stroke="#cbd2e6"/>
+<text x="410" y="159" font-size="20" font-weight="600">检查当前宿主与组合</text>
+<text x="410" y="189" font-size="16">官方版本变化先建立对应基线</text>
+<text x="410" y="214" font-size="16">用户配置按补丁路径归属检查</text>
+<rect x="40" y="290" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="60" y="324" font-size="20" font-weight="600">组合未变</text>
+<text x="60" y="354" font-size="16">核对当前安装内容和组合记录</text>
+<text x="60" y="379" font-size="16">不搬移、重放已有文件层</text>
+<rect x="425" y="290" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="445" y="324" font-size="20" font-weight="600">仅改变加载配置</text>
+<text x="445" y="354" font-size="16">执行前核对旧组合与目标依赖</text>
+<text x="445" y="379" font-size="16">通过可恢复事务保存配置</text>
+<rect x="810" y="290" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="830" y="324" font-size="20" font-weight="600">需要切换文件补丁</text>
+<text x="830" y="354" font-size="16">校验输入、正向和反向内容</text>
+<text x="830" y="379" font-size="16">执行并核对结果，失败可恢复</text>
+<rect x="390" y="480" width="400" height="130" rx="14" fill="#edf0ff" stroke="#cbd2e6"/>
+<text x="410" y="514" font-size="20" font-weight="600">目录身份与连续日志是否匹配？</text>
+<text x="410" y="544" font-size="16">检查新增、删除、修改和依赖变化</text>
+<text x="410" y="569" font-size="16">排除范围不同的索引不能混用</text>
+<rect x="100" y="675" width="410" height="130" rx="14" fill="#e9f6f0" stroke="#cbd2e6"/>
+<text x="120" y="709" font-size="20" font-weight="600">匹配：复用已验证目录</text>
+<text x="120" y="739" font-size="16">仍读依赖清单并复核解析路径</text>
+<text x="120" y="764" font-size="16">ASAR 只复用相同目录字节的解析</text>
+<rect x="670" y="675" width="410" height="130" rx="14" fill="#e9f6f0" stroke="#cbd2e6"/>
+<text x="690" y="709" font-size="20" font-weight="600">变化或证据不足：重新读取</text>
+<text x="690" y="739" font-size="16">计算受影响目录的文件 SHA-256</text>
+<text x="690" y="764" font-size="16">验证完成后更新可丢弃检查点</text>
+<text x="40" y="875" font-size="15" fill="#5d6882">所有路径在启动前再次核对配置、插件依赖与宿主；内容冲突会给出具体原因。</text>
+<text x="40" y="900" font-size="15" fill="#5d6882">安装 / 完整恢复核对全部包副本；文件切换核对实际使用的双向补丁，日常启动检查副本存在。</text>
+</g></svg>

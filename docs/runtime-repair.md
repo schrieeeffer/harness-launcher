@@ -2,7 +2,7 @@
 
 [使用指南](../README.md) · [官方更新边界](host-updates.md) · [架构与原理](architecture.md)
 
-当前 0.4.3 为 Windows x64 提供同版本官方运行时恢复。适用于官方更新后 `resources/runtime` 为空或部分文件缺失，例如 `ENOENT ... office-skills/office/SKILL.md`。此功能修复安装文件缺失，插件兼容性由官方更新接续流程单独检查，不能拦截官方更新器自行重启。
+当前 0.4.4 为 Windows x64 提供同版本官方运行时恢复。适用于官方更新后 `resources/runtime` 为空或部分文件缺失，例如 `ENOENT ... office-skills/office/SKILL.md`。此功能修复安装文件缺失，插件兼容性由官方更新接续流程单独检查，不能拦截官方更新器自行重启。
 
 补齐运行时后若仍提示“宿主文件已变化”，优先使用同一设置页的[官方更新接续](official-update-flow.md)。[手动原生启动](official-update-native.md)仍作为受校验的备用入口。
 

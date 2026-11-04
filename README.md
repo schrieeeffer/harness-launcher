@@ -4,11 +4,11 @@
 
 给 DeepSeek Harness 加一个插件启动面板。选好今天要用的插件，点击启动；想回到官方原版时，切换到原生模式。安装、检查更新、卸载和恢复旧版本，也在同一个窗口里完成。
 
-[下载 Windows 便携版](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.3) · [English](README.en.md) · [使用文档](#使用文档) · [反馈问题](https://github.com/schrieeeffer/harness-launcher/issues)
+[下载 Windows 便携版](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) · [English](README.en.md) · [使用文档](#使用文档) · [反馈问题](https://github.com/schrieeeffer/harness-launcher/issues)
 
-当前版本：**0.4.3**（社区预览版）。支持 Windows 10/11 x64，便携包自带运行环境。先安装官方 DeepSeek Harness，再使用本启动器。
+当前版本：**0.4.4**（社区预览版）。支持 Windows 10/11 x64，便携包自带运行环境。先安装官方 DeepSeek Harness，再使用本启动器。
 
-![启动器首页：选择 pet，准备启动自己的插件组合](docs/images/maintenance-ui/10-overview.jpg)
+![启动器首页：选择 pet，准备启动自己的插件组合](docs/images/startup/launcher.jpg)
 
 ## 适合哪些时候用
 
@@ -31,7 +31,7 @@
 ## 下载与第一次启动
 
 1. 安装官方 DeepSeek Harness 桌面版，并至少打开一次。
-2. 到 [Releases](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.3) 下载 `Harness-Launcher-0.4.3-Windows-x64.zip`。
+2. 到 [Releases](https://github.com/schrieeeffer/harness-launcher/releases/tag/v0.4.4) 下载 `Harness-Launcher-0.4.4-Windows-x64.zip`。
 3. 把 ZIP 完整解压到自己的文件夹，例如 `D:\Apps\HarnessLauncher`。
 4. 双击 `Harness Launcher.exe`。无需安装 Python，也不用输入命令。
 5. 如果没有找到 Harness，打开“设置与说明”，点击“自动检测”，或填写官方程序路径。
@@ -41,20 +41,20 @@
 发布页同时提供 `SHA256SUMS.txt`。主程序目前没有商业代码签名，可用 PowerShell 查看下载包的摘要，与发布页的文件核对：
 
 ```powershell
-Get-FileHash .\Harness-Launcher-0.4.3-Windows-x64.zip -Algorithm SHA256
+Get-FileHash .\Harness-Launcher-0.4.4-Windows-x64.zip -Algorithm SHA256
 ```
 
 ## 选择插件，启动工作
 
 首页的开关编辑“本次启动”的组合。右侧会列出选中的插件；点击“启动 Harness”后，启动器才应用这套组合并打开应用。只想先保存配置，可以选择“仅应用，不启动”。
 
-“当前配置”载入已经应用的组合，“全部可用插件”选中可用项，“原生模式（全部关闭）”关闭额外插件，官方基础组件始终保留。切换前先从 Harness 的“应用 → 退出”完整退出，避免在应用使用文件时修改它们。
+“当前配置”载入已经应用的组合，“全部可用插件”选中可用项，“原生模式（全部关闭）”关闭由启动器管理的额外插件，官方基础组件始终保留。在 Harness 内自行安装的插件由官方页面启停，详见下方的“让 Harness 给自己做插件”。切换前先从 Harness 的“应用 → 退出”完整退出，避免在应用使用文件时修改它们。
 
 把常用组合保存为方案后，可以从左侧直接选择。方案支持 JSON 导入和导出，适合备份自己的搭配；插件版本变化后，检查一次组合并重新保存即可。
 
 下图是关闭 pet 后重新打开的官方原生界面。本轮同时比对了官方程序、归档和 CLI 文件，结果与同版本官方安装包一致。
 
-![关闭插件并恢复官方原生界面](docs/images/maintenance-ui/12-native-restored.png)
+![关闭插件并恢复官方原生界面](docs/images/startup/native.jpg)
 
 启动进度条显示当前步骤、文件数量和已经用去的时间。日常启动复用已有校验记录，安装、下载和首次记录会显示各自的维护进度。
 
@@ -119,9 +119,19 @@ Get-FileHash .\Harness-Launcher-0.4.3-Windows-x64.zip -Algorithm SHA256
 
 普通插件通常只需要加载配置和通用文件差异记录；purge 还涉及程序归档与解包目录，适配器负责这些文件的切换，沿用同一套校验和恢复记录。
 
+特殊插件的安装脚本单独管理：普通插件安装时，purge 等适配插件的构建脚本保持禁用。只有在启动器里明确维护该特殊插件时，才临时允许所选固定来源的脚本，结束后重新隔离。策略保存在当前 Harness 配置目录，退出启动器后仍然生效。
+
 已经在 `dsh-purge 1.1.90 + Harness 0.2.1-rc.5` 上完成两轮真实启停和原生恢复，过程见 [purge 验证记录](docs/purge-source-audit.md)。本次维护界面测试使用 pet，保留这份 purge 安装及记录。
 
 建议首次安装、升级或排查问题时单独启用 purge，先确认它能正常运行，再尝试与其它插件组合。官方 Harness 升级后，需要在新版本上重新验证，旧程序文件不会直接覆盖到新版安装。
+
+## 让 Harness 给自己做插件
+
+在 Harness 的创造模式中编写、安装自己的插件，可以继续沿用官方流程。这类插件在启动器里显示为“由 Harness 管理”，安装、更新和启停都在 Harness 内完成；启动器保留它们的当前加载配置，也保留本地源码目录。
+
+日常修改模型设置、插件配置等用户选项，不会因为一个已停用的补丁而被锁住。启动器只阻止会覆盖正在使用或准备启用的补丁文件的改动。若要切换启动器保存的补丁组合，先在 Harness 内停用自行管理的插件；停用后的包可以继续留在本机。
+
+0.4.4 修复了两种相关问题：特殊插件残留的构建授权拦住其他插件安装，以及正常用户配置变化被当成补丁冲突。已经通过官方安装器完成本地插件安装并重启确认组件运行，详见[官方插件共存验证](docs/official-plugin-coexistence.md)。
 
 ## 官方 Harness 更新后怎么办
 
@@ -155,7 +165,19 @@ Get-FileHash .\Harness-Launcher-0.4.3-Windows-x64.zip -Algorithm SHA256
 
 日常启动和已记录组合的切换会复用文件索引与校验结果，目标是约 30 秒到窗口可用。第一次安装、维护恢复或文件变化后的完整检查，耗时会更多；界面会显示具体阶段和文件计数。实际时间受磁盘、插件依赖和应用本身启动影响。
 
-**当前的速度短板：**本次 pet 0.4.1 实测中，切换启用的后台流程耗时 101.6 秒，同组合重启为 80.5 秒。完整卸载恢复约 19 分钟。功能已完成实测，但这组插件和依赖尚未达到启动速度目标，具体数据保留在[实测记录](docs/maintenance-ui-validation.md)。
+0.4.4 在本机使用 pet 0.4.1、官方 Harness 0.2.1-rc.5 完成了以下实测，计时包含 Harness 自身加载，直到窗口输入框可用：
+
+| 启动方式 | 窗口可用时间 |
+| --- | ---: |
+| pet 保持开启，正常退出后再启动 | 28.1 秒 |
+| 关闭 pet，回到官方原生模式 | 28.5 秒 |
+| 从原生模式重新开启 pet | 28.8 秒 |
+
+这次优化把插件包目录检查点用于日常校验，拆开运行时和 CLI 的重复扫描，并复用同一轮归档目录解析。开关切换无需重新下载插件。文件改变或变更日志不连续时，会重新读取受影响目录；切换和回滚需要的文件仍校验内容。
+
+![pet 快速启动后的实际主界面](docs/images/startup/pet.jpg)
+
+这些是本机样本，其他电脑和插件的时间会不同。完整卸载恢复此前约 19 分钟，仍是单独的维护性能问题；本次没有重新执行卸载恢复。计时方法、修复内容和验证范围见[启动速度实测](docs/startup-validation.md)。
 
 相同内容的恢复副本只保存一份，插件版本查询也复用短期缓存。启动流程不顺带做更新检查或缓存清理。[校验与缓存原理](docs/checkpoint-design.md)解释了哪些检查可以复用。
 
@@ -193,6 +215,7 @@ python packaging/build_portable.py
 
 | 文档 | 内容 |
 | --- | --- |
+| [启动速度实测](docs/startup-validation.md) | pet 日常启动、启停切换、文件一致性和计时方法 |
 | [维护界面与普通插件实测](docs/maintenance-ui-validation.md) | 本次 pet 更新、卸载、恢复和界面截图 |
 | [插件操作与验证记录](docs/validation-0.4.3.md) | whale、pet、purge 的已完成实测及环境 |
 | [安装来源](docs/install-sources.md) | npm、本地目录、Git 与首次运行记录 |

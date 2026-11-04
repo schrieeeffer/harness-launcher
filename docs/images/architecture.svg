@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="950" viewBox="0 0 1180 950" role="img">
+<title>Harness Launcher · 0.4.4 架构</title>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="#697499"/></marker></defs>
+<rect width="1180" height="950" rx="24" fill="#f6f7fb"/>
+<g font-family="Segoe UI,Microsoft YaHei,sans-serif" fill="#18233e">
+<text x="40" y="55" font-size="28" font-weight="700">Harness Launcher · 0.4.4 架构</text>
+<text x="40" y="88" font-size="16" fill="#5d6882">启动、维护和官方更新共用文件证据；日常启动只处理本次组合。</text>
+<path d="M590 250V260H205V285" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 250V285" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 260H975V285" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 415V450H205V485" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 415V485" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 450H975V485" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M975 415V485" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M205 615V685" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M590 615V685" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<path d="M975 615V685" stroke="#697499" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+<rect x="390" y="125" width="400" height="125" rx="14" fill="#edf0ff" stroke="#cbd2e6"/>
+<text x="410" y="159" font-size="20" font-weight="600">启动面板 / Manager</text>
+<text x="410" y="189" font-size="16">选择组合、认证请求、检查应用状态</text>
+<text x="410" y="214" font-size="16">自制插件保留官方加载配置</text>
+<rect x="40" y="285" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="60" y="319" font-size="20" font-weight="600">官方版本与运行时</text>
+<text x="60" y="349" font-size="16">识别宿主变化，接续新版基线</text>
+<text x="60" y="374" font-size="16">运行时与 CLI 分开校验</text>
+<rect x="425" y="285" width="330" height="130" rx="14" fill="#edf0ff" stroke="#cbd2e6"/>
+<text x="445" y="319" font-size="20" font-weight="600">SwitchPlan</text>
+<text x="445" y="349" font-size="16">原组合验证 / 配置切换 / 文件切换</text>
+<text x="445" y="374" font-size="16">预检 → 事务 → 结果校验</text>
+<rect x="810" y="285" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="830" y="319" font-size="20" font-weight="600">插件维护与脚本隔离</text>
+<text x="830" y="349" font-size="16">特殊脚本仅在专门维护时运行</text>
+<text x="830" y="374" font-size="16">普通插件沿用官方安装流程</text>
+<rect x="40" y="485" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="60" y="519" font-size="20" font-weight="600">VersionStore</text>
+<text x="60" y="549" font-size="16">安装包、依赖图和组合记录</text>
+<text x="60" y="574" font-size="16">一轮查找共享目录列表，再次复核</text>
+<rect x="425" y="485" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="445" y="519" font-size="20" font-weight="600">FileView</text>
+<text x="445" y="549" font-size="16">实际文件与只读组合预演</text>
+<text x="445" y="574" font-size="16">包目录范围进入检查点身份</text>
+<rect x="810" y="485" width="330" height="130" rx="14" fill="#ffffff" stroke="#cbd2e6"/>
+<text x="830" y="519" font-size="20" font-weight="600">ContentStore / 事务日志</text>
+<text x="830" y="549" font-size="16">SHA-256 内容去重与恢复副本</text>
+<text x="830" y="574" font-size="16">执行游标、提交与中断恢复</text>
+<rect x="40" y="685" width="330" height="130" rx="14" fill="#e9f6f0" stroke="#cbd2e6"/>
+<text x="60" y="719" font-size="20" font-weight="600">ArchiveIndex</text>
+<text x="60" y="749" font-size="16">按实际目录字节复用 JSON 解析</text>
+<text x="60" y="774" font-size="16">每次仍读取和校验文件内容</text>
+<rect x="425" y="685" width="330" height="130" rx="14" fill="#e9f6f0" stroke="#cbd2e6"/>
+<text x="445" y="719" font-size="20" font-weight="600">NTFS 校验缓存</text>
+<text x="445" y="749" font-size="16">目录身份 + 连续 USN + 文件摘要</text>
+<text x="445" y="774" font-size="16">变化或日志断档 → 重新校验</text>
+<rect x="810" y="685" width="330" height="130" rx="14" fill="#e9f6f0" stroke="#cbd2e6"/>
+<text x="830" y="719" font-size="20" font-weight="600">Harness 实际窗口</text>
+<text x="830" y="749" font-size="16">启动前复核配置、依赖与宿主</text>
+<text x="830" y="774" font-size="16">窗口可用时间单独测量</text>
+<text x="40" y="875" font-size="15" fill="#5d6882">普通用户设置可独立变化；活动或待启用补丁涉及的路径仍检查冲突。恢复对象单独保留。</text>
+<text x="40" y="900" font-size="15" fill="#5d6882">0.4.4 本机 pet 三场景：28.1–28.8 秒到输入框可用。细节和样本范围见启动实测。</text>
+</g></svg>
